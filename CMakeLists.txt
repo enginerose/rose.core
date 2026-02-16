@@ -2,8 +2,10 @@ cmake_minimum_required(VERSION 3.31)
 project(rose.core)
 
 
+file(GLOB_RECURSE ROSE_HEADERS include/*.hpp)
+file(GLOB_RECURSE ROSE_SOURCES source/*.cpp)
 
-add_executable(${PROJECT_NAME} source/main.cpp)
+add_executable(${PROJECT_NAME} ${ROSE_HEADERS} ${ROSE_SOURCES})
 
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
