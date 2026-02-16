@@ -57,7 +57,7 @@ namespace rose::core::opengl
         ShaderProgram& operator=(const ShaderProgram&) = delete;
 
         ShaderProgram(ShaderProgram&& other) noexcept
-            : program_(std::exchange(other.program_, 0)), uniformCache_(std::move(other.uniformCache_))
+            : m_program(std::exchange(other.m_program, 0)), uniformCache_(std::move(other.uniformCache_))
         {
         }
 
@@ -66,7 +66,7 @@ namespace rose::core::opengl
             if (this != &other)
             {
                 destroy();
-                program_ = std::exchange(other.program_, 0);
+                m_program = std::exchange(other.m_program, 0);
                 uniformCache_ = std::move(other.uniformCache_);
             }
             return *this;
@@ -74,7 +74,7 @@ namespace rose::core::opengl
 
         bool valid() const noexcept
         {
-            return program_ != 0;
+            return m_program != 0;
         }
         explicit operator bool() const noexcept
         {
@@ -83,25 +83,26 @@ namespace rose::core::opengl
 
         GLuint id() const noexcept
         {
-            return program_;
+            return m_program;
         }
 
         // Rebuild shader program from source strings.
-        void create(const std::string_view vertexSrc, std::string_view fragmentSrc, std::string_view geometrySrc = {})
+        void create(const std::string_view vertex_src, const std::string_view fragment_src,
+               const std::string_view geometry_src = {})
         {
             destroy();
 
-            std::vector<GLuint> shaderIds;
-            shaderIds.reserve(3);
+            std::vector<GLuint> shader_ids;
+            shader_ids.reserve(3);
 
             try
             {
-                shaderIds.push_back(compile_shader(GL_VERTEX_SHADER, vertexSrc));
-                shaderIds.push_back(compile_shader(GL_FRAGMENT_SHADER, fragmentSrc));
+                shader_ids.push_back(compile_shader(GL_VERTEX_SHADER, vertex_src));
+                shader_ids.push_back(compile_shader(GL_FRAGMENT_SHADER, fragment_src));
 
-                if (!geometrySrc.empty())
+                if (!geometry_src.empty())
                 {
-                    shaderIds.push_back(compile_shader(GL_GEOMETRY_SHADER, geometrySrc));
+                    shader_ids.push_back(compile_shader(GL_GEOMETRY_SHADER, geometry_src));
                 }
 
                 GLuint prog = glCreateProgram();
@@ -110,7 +111,7 @@ namespace rose::core::opengl
                     throw ShaderError("glCreateProgram() failed.");
                 }
 
-                for (GLuint s : shaderIds)
+                for (GLuint s : shader_ids)
                 {
                     glAttachShader(prog, s);
                 }
@@ -126,18 +127,18 @@ namespace rose::core::opengl
                     throw ShaderError("Program link failed:\n" + log);
                 }
 
-                for (GLuint s : shaderIds)
+                for (GLuint s : shader_ids)
                 {
                     glDetachShader(prog, s);
                     glDeleteShader(s);
                 }
 
-                program_ = prog;
+                m_program = prog;
                 uniformCache_.clear();
             }
             catch (...)
             {
-                for (GLuint s : shaderIds)
+                for (GLuint s : shader_ids)
                 {
                     glDeleteShader(s);
                 }
@@ -148,11 +149,11 @@ namespace rose::core::opengl
         // Bind for drawing / classic uniform setting.
         void use() const
         {
-            if (!program_)
+            if (!m_program)
             {
                 throw ShaderError("Attempted to use an invalid shader program.");
             }
-            glUseProgram(program_);
+            glUseProgram(m_program);
         }
 
         // Uniform helpers (requires this program to be active via use()).
@@ -209,15 +210,15 @@ namespace rose::core::opengl
         }
 
     private:
-        GLuint program_ = 0;
+        GLuint m_program = 0;
         mutable std::unordered_map<std::string, GLint> uniformCache_{};
 
         void destroy() noexcept
         {
-            if (program_ != 0)
+            if (m_program != 0)
             {
-                glDeleteProgram(program_);
-                program_ = 0;
+                glDeleteProgram(m_program);
+                m_program = 0;
             }
             uniformCache_.clear();
         }
@@ -269,7 +270,7 @@ namespace rose::core::opengl
                 return it->second;
             }
 
-            const GLint loc = glGetUniformLocation(program_, key.c_str());
+            const GLint loc = glGetUniformLocation(m_program, key.c_str());
             uniformCache_.emplace(std::move(key), loc);
             return loc;
         }
