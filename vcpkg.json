@@ -1,0 +1,11 @@
+{
+  "name": "rose-core",
+  "version": "3.10.1",
+  "supports": "windows | linux",
+  "dependencies": [
+    "glfw3",
+    "glew",
+    "tinygltf",
+    "orange-math"
+  ]
+}
