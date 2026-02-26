@@ -52,7 +52,7 @@ namespace rose::core
         constexpr float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
         omath::opengl_engine::Camera camera{
-            {0, 0, 200}, {}, {800.f, 800.f}, omath::projection::FieldOfView::from_degrees(90.f), 0.1f, 1000.f
+                {0, 0, 200}, {}, {800.f, 800.f}, omath::projection::FieldOfView::from_degrees(90.f), 0.1f, 1000.f
         };
 
         constexpr float move_speed = 100.f;
@@ -114,18 +114,26 @@ namespace rose::core
             {
                 const float yaw_rad = camera.get_view_angles().yaw.as_radians();
                 const omath::Vector3<float> forward = {-std::sin(yaw_rad), 0.f, -std::cos(yaw_rad)};
-                const omath::Vector3<float> right   = { std::cos(yaw_rad), 0.f, -std::sin(yaw_rad)};
+                const omath::Vector3<float> right = {std::cos(yaw_rad), 0.f, -std::sin(yaw_rad)};
 
                 omath::Vector3<float> move = {0.f, 0.f, 0.f};
-                if (glfwGetKey(m_window, GLFW_KEY_W)            == GLFW_PRESS) move = move + forward;
-                if (glfwGetKey(m_window, GLFW_KEY_S)            == GLFW_PRESS) move = move - forward;
-                if (glfwGetKey(m_window, GLFW_KEY_D)            == GLFW_PRESS) move = move + right;
-                if (glfwGetKey(m_window, GLFW_KEY_A)            == GLFW_PRESS) move = move - right;
-                if (glfwGetKey(m_window, GLFW_KEY_SPACE)        == GLFW_PRESS) move.y += 1.f;
-                if (glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) move.y -= 1.f;
+                if (glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS)
+                    move = move + forward;
+                if (glfwGetKey(m_window, GLFW_KEY_S) == GLFW_PRESS)
+                    move = move - forward;
+                if (glfwGetKey(m_window, GLFW_KEY_D) == GLFW_PRESS)
+                    move = move + right;
+                if (glfwGetKey(m_window, GLFW_KEY_A) == GLFW_PRESS)
+                    move = move - right;
+                if (glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS)
+                    move.y += 1.f;
+                if (glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
+                    move.y -= 1.f;
 
                 const float speed = move_speed * delta_time;
-                camera.set_origin(camera.get_origin() + omath::Vector3<float>{move.x * speed, move.y * speed, move.z * speed});
+                camera.set_origin(
+                        camera.get_origin() + omath::Vector3<float>{move.x * speed, move.y * speed, move.z * speed}
+                );
             }
 
             int fb_w, fb_h;
