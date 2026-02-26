@@ -60,7 +60,7 @@ namespace rose::core
             map_colliders.emplace_back(mesh.cpu_mesh());
         spdlog::info("Map colliders ready.");
 
-        Player player{{0.f, 300.f, 0.f}};
+        Player player{{0.f, 5.f, 0.f}};
 
         omath::opengl_engine::Camera camera{
             player.get_eye_position(),

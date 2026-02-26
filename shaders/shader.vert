@@ -6,11 +6,12 @@ layout (location = 2) in vec2 aUv;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 
-out vec3 vNormal;
+out vec3 vWorldNormal;
 out vec2 vUv;
 
 void main() {
-    vNormal = aNormal;
+    // Inverse-transpose of model's 3x3 — correct for non-uniform scale
+    vWorldNormal = mat3(transpose(inverse(uModel))) * aNormal;
     vUv = aUv;
     gl_Position = uMVP * uModel * vec4(aPos, 1.0);
 }
