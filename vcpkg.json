@@ -9,6 +9,13 @@
     "orange-math",
     "opengl",
     "spdlog",
-    "boost-dll"
+    "boost-dll",
+    {
+      "name": "imgui",
+      "features": [
+        "glfw-binding",
+        "opengl3-binding"
+      ]
+    }
   ]
 }

@@ -26,15 +26,15 @@ namespace rose::core
     public:
         // Box half-extents (centred on m_position) — 1 unit = 1 metre
         // Player capsule approximation: 0.5 m wide, 1.8 m tall
-        static constexpr float k_half_width  = 0.25f;
-        static constexpr float k_half_height = 0.9f;
-        static constexpr float k_half_depth  = 0.25f;
+        static constexpr float k_half_width  = 1.25f;
+        static constexpr float k_half_height = 1.9f;
+        static constexpr float k_half_depth  = 1.25f;
 
         // Eye height above m_position centre (~1.65 m above feet)
-        static constexpr float k_eye_height = 0.75f;
+        static constexpr float k_eye_height = 1.25f;
 
-        static constexpr float k_move_speed       = 5.f;
-        static constexpr float k_jump_speed        = 5.f;
+        static constexpr float k_move_speed       = 10.f;
+        static constexpr float k_jump_speed        = 10.f;
         static constexpr float k_gravity           = -20.f;
         static constexpr float k_mouse_sensitivity = 0.1f;
 
@@ -53,7 +53,6 @@ namespace rose::core
         [[nodiscard]] bool                                    is_grounded()      const { return m_is_grounded; }
 
     private:
-        omath::Vector3<float>           m_position;
         omath::Vector3<float>           m_velocity{};
         bool                            m_is_grounded = false;
         omath::opengl_engine::ViewAngles m_view_angles{};

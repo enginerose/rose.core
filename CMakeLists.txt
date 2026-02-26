@@ -33,10 +33,10 @@ find_package(omath CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(Boost REQUIRED COMPONENTS dll)
-
+find_package(imgui CONFIG REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 
 
-target_link_libraries(${PROJECT_NAME} PRIVATE omath::omath GLEW::GLEW glfw OpenGL::GL spdlog::spdlog Boost::dll)
+target_link_libraries(${PROJECT_NAME} PRIVATE imgui::imgui omath::omath GLEW::GLEW glfw OpenGL::GL spdlog::spdlog Boost::dll)
 target_link_libraries(${PROJECT_NAME} PRIVATE)
 target_include_directories(${PROJECT_NAME} PRIVATE ${TINYGLTF_INCLUDE_DIRS})

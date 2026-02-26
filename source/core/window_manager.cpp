@@ -9,7 +9,8 @@
 #include <omath/collision/mesh_collider.hpp>
 #include <omath/engines/opengl_engine/camera.hpp>
 #include <spdlog/spdlog.h>
-
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
 static void GlfwErrorCallback(int code, const char* desc)
 {
     spdlog::error("GLFW error {}: {}", code, desc);
@@ -43,11 +44,20 @@ namespace rose::core
             );
             std::terminate();
         }
+
+        glfwSwapInterval(1);
+        ImGui::CreateContext();
+        ImGui_ImplGlfw_InitForOpenGL(m_window, true);
+        ImGui_ImplOpenGL3_Init("#version 330");
+
     }
 
     void WindowManager::run() const
     {
         glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
         glClearColor(0.3f, 0.3f, 0.3f, 1.f);
 
         auto map = Model("/home/orange/Downloads/map.glb");
@@ -71,6 +81,8 @@ namespace rose::core
             10000.f
         };
 
+        auto shader_program = opengl::ShaderProgram::from_files("shaders/shader.vert", "shaders/shader.frag");
+
         bool   mouse_captured  = false;
         bool   esc_was_pressed = false;
         bool   first_mouse     = true;
@@ -87,6 +99,16 @@ namespace rose::core
                 glfwTerminate();
                 exit(EXIT_SUCCESS);
             }
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
+            // Your other ImGui windows and widgets here...
+
+            // Example of how to display the FPS in a window
+            ImGui::Begin("Performance");
+            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0 / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+            ImGui::End();
 
             const double current_time = glfwGetTime();
             const float  delta_time   = static_cast<float>(current_time - last_time);
@@ -127,27 +149,23 @@ namespace rose::core
                 last_mouse_x = mx;
                 last_mouse_y = my;
             }
-
-            // --- Update player (movement + gravity + GJK/EPA collision) ---
             player.update(delta_time, map_colliders, input);
-
-            // --- Sync camera to player eye ---
             camera.set_origin(player.get_eye_position());
             camera.set_view_angles(player.get_view_angles());
-
             // --- Render ---
             int fb_w, fb_h;
+            ImGui::Render();
             glfwGetFramebufferSize(m_window, &fb_w, &fb_h);
             glViewport(0, 0, fb_w, fb_h);
             camera.set_view_port({static_cast<float>(fb_w), static_cast<float>(fb_h)});
 
-            auto shader_program = opengl::ShaderProgram::from_files("shaders/shader.vert", "shaders/shader.frag");
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
             shader_program.use();
             shader_program.set_mat4("uMVP", camera.get_view_projection_matrix().raw_array().data());
             map.draw(shader_program);
 
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             glfwSwapBuffers(m_window);
         }
     }
