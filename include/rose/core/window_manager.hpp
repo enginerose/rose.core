@@ -12,9 +12,9 @@ namespace rose::core
     {
     public:
         explicit WindowManager();
-        void run();
+        void run() const;
     private:
-        omath::Vector2<int> m_window_size = {800, 600};
+        omath::Vector2<int> m_window_size = {1280, 720};
         GLFWwindow* m_window;
     };
 } // namespace rose::core

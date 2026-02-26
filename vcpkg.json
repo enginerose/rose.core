@@ -8,6 +8,7 @@
     "tinygltf",
     "orange-math",
     "opengl",
-    "spdlog"
+    "spdlog",
+    "boost-dll"
   ]
 }
