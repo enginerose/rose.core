@@ -28,7 +28,6 @@ namespace rose::core
         }
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-
         m_window = glfwCreateWindow(m_window_size.x, m_window_size.y, "ROSE", nullptr, nullptr);
         if (!m_window)
         {
@@ -45,7 +44,7 @@ namespace rose::core
             std::terminate();
         }
 
-        glfwSwapInterval(1);
+        glfwSwapInterval(0);
         ImGui::CreateContext();
         ImGui_ImplGlfw_InitForOpenGL(m_window, true);
         ImGui_ImplOpenGL3_Init("#version 330");
@@ -92,6 +91,7 @@ namespace rose::core
 
         while (true)
         {
+            const auto frame_start = std::chrono::high_resolution_clock::now();
             glfwPollEvents();
 
             if (glfwWindowShouldClose(m_window))
@@ -99,6 +99,11 @@ namespace rose::core
                 glfwTerminate();
                 exit(EXIT_SUCCESS);
             }
+
+            const double current_time = glfwGetTime();
+            const float delta_time = std::min(static_cast<float>(current_time - last_time), 0.05f);
+            last_time = current_time;
+
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
@@ -109,11 +114,6 @@ namespace rose::core
             ImGui::Begin("Performance");
             ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0 / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
             ImGui::End();
-
-            const double current_time = glfwGetTime();
-            const float  delta_time   = static_cast<float>(current_time - last_time);
-            last_time = current_time;
-
             // --- ESC toggles mouse capture ---
             const bool esc_pressed = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
             if (esc_pressed && !esc_was_pressed)
@@ -152,21 +152,24 @@ namespace rose::core
             player.update(delta_time, map_colliders, input);
             camera.set_origin(player.get_eye_position());
             camera.set_view_angles(player.get_view_angles());
-            // --- Render ---
-            int fb_w, fb_h;
-            ImGui::Render();
-            glfwGetFramebufferSize(m_window, &fb_w, &fb_h);
-            glViewport(0, 0, fb_w, fb_h);
-            camera.set_view_port({static_cast<float>(fb_w), static_cast<float>(fb_h)});
-
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
             shader_program.use();
             shader_program.set_mat4("uMVP", camera.get_view_projection_matrix().raw_array().data());
             map.draw(shader_program);
-
+            ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            int fb_w, fb_h;
+            glfwGetFramebufferSize(m_window, &fb_w, &fb_h);
+            glViewport(0, 0, fb_w, fb_h);
             glfwSwapBuffers(m_window);
+            camera.set_view_port({static_cast<float>(fb_w), static_cast<float>(fb_h)});
+            last_time = current_time;
+
+            const auto frame_end = std::chrono::high_resolution_clock::now();
+
+            const auto wait_for = std::chrono::duration_cast<std::chrono::microseconds>(frame_end - frame_start).count();
+
+            //std::this_thread::sleep_for(std::chrono::microseconds(8333-wait_for));
         }
     }
 } // namespace rose::core
