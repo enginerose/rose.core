@@ -3,8 +3,10 @@
 //
 #pragma once
 #include "rose/core/collision_world.hpp"
+#include "rose/core/thread_pool.hpp"
 #include <omath/engines/opengl_engine/constants.hpp>
 #include <omath/linear_algebra/vector3.hpp>
+#include <optional>
 #include <vector>
 
 namespace rose::core
@@ -70,7 +72,11 @@ namespace rose::core
         void apply_friction(float dt);
         void accelerate(const omath::Vector3<float>& wish_dir, float wish_speed, float accel, float dt);
 
-        // Reused scratch buffer for chunk query results — avoids per-call heap alloc.
-        std::vector<int> m_query_buf;
+        // Reused scratch buffers — both grown to capacity once, cleared each pass.
+        std::vector<int>                                   m_query_buf;
+        std::vector<std::optional<omath::Vector3<float>>>  m_collision_results;
+
+        // Persistent thread pool — workers are created once and reused every frame.
+        ThreadPool m_thread_pool;
     };
 } // namespace rose::core

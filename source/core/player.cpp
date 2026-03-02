@@ -3,6 +3,7 @@
 //
 #include "rose/core/player.hpp"
 #include <cmath>
+#include <future>
 #include <omath/3d_primitives/mesh.hpp>
 #include <omath/collision/epa_algorithm.hpp>
 #include <omath/collision/gjk_algorithm.hpp>
@@ -138,46 +139,97 @@ namespace rose::core
     }
 
     // ---------------------------------------------------------------------------
-    // resolve_collisions — two-layer broadphase before GJK + EPA:
-    //   1. Chunk grid  — query only colliders whose chunks overlap the player AABB.
-    //   2. AABB check  — fast axis-aligned overlap test against each candidate.
-    //   3. GJK         — exact convex-shape intersection test.
-    //   4. EPA         — penetration vector for depenetration.
+    // resolve_collisions — broadphase + parallel GJK/EPA + serial depenetration.
+    //
+    // Pipeline per pass:
+    //   1. Chunk grid query  — only candidates in chunks overlapping player AABB.
+    //   2. AABB vs AABB      — fast rejection before touching GJK.
+    //   3. GJK + EPA         — run in parallel across all CPU cores; each worker
+    //                          owns a non-overlapping slice of the candidate list
+    //                          and writes its penetration vectors into m_collision_results.
+    //   4. Serial depenetrate — apply all results on the main thread in order.
+    //                           Order matters: each push shifts the player origin,
+    //                           affecting subsequent up_dot classifications.
+    //
+    // Thread safety of reading m_collider from workers:
+    //   MeshCollider::find_abs_furthest_vertex_position() calls get_to_world_matrix(),
+    //   which has a lazy mutable cache. The single warm-up call before dispatching
+    //   tasks ensures the cache is already populated (no writes during parallel phase).
     // ---------------------------------------------------------------------------
     void Player::resolve_collisions(const CollisionWorld& world)
     {
         const auto pos = m_collider.get_origin();
 
-        // Player world-space AABB (exact, since the player collider is an AABB).
         const Aabb player_aabb{
             {pos.x - k_half_width, pos.y - k_half_height, pos.z - k_half_depth},
             {pos.x + k_half_width, pos.y + k_half_height, pos.z + k_half_depth}
         };
 
-        // --- Layer 1: chunk query (reuses m_query_buf to avoid per-frame alloc) ---
+        // --- Layer 1: chunk query ---
         m_query_buf.clear();
         world.query(player_aabb, m_query_buf);
 
-        for (const int idx : m_query_buf)
+        const int n = static_cast<int>(m_query_buf.size());
+        if (n == 0)
+            return;
+
+        m_collision_results.assign(n, std::nullopt);
+
+        // Warm the player's lazy world-matrix cache before worker threads read it.
+        (void)m_collider.m_mesh.get_to_world_matrix();
+
+        // --- Layers 2–3: parallel AABB check + GJK + EPA ---
+        // Partition the candidate list into at most thread_count slices.
+        const int n_tasks = std::min(n, m_thread_pool.size());
+        const int chunk   = (n + n_tasks - 1) / n_tasks;
+
+        std::vector<std::future<void>> futures;
+        futures.reserve(n_tasks);
+
+        for (int t = 0; t < n_tasks; ++t)
         {
-            // --- Layer 2: AABB vs AABB ---
-            if (!player_aabb.overlaps(world.aabbs[idx]))
+            const int begin = t * chunk;
+            if (begin >= n) break;
+            const int end = std::min(begin + chunk, n);
+
+            futures.push_back(m_thread_pool.submit([&, begin, end]
+            {
+                for (int i = begin; i < end; ++i)
+                {
+                    const int idx = m_query_buf[i];
+
+                    // Layer 2: AABB vs AABB
+                    if (!player_aabb.overlaps(world.aabbs[idx]))
+                        continue;
+
+                    // Layer 3: GJK broad check
+                    const auto hit = Gjk::is_collide_with_simplex_info(world.colliders[idx], m_collider);
+                    if (!hit.hit)
+                        continue;
+
+                    // Layer 4: EPA — each call is fully stateless; thread-safe by design
+                    const auto result = Epa::solve(world.colliders[idx], m_collider, hit.simplex);
+                    if (!result)
+                        continue;
+
+                    // Each thread owns [begin, end) — no synchronisation needed.
+                    m_collision_results[i] = result->penetration_vector;
+                }
+            }));
+        }
+
+        for (auto& f : futures)
+            f.get();
+
+        // --- Layer 4: serial depenetration ---
+        for (int i = 0; i < n; ++i)
+        {
+            if (!m_collision_results[i])
                 continue;
 
-            const auto& map_col = world.colliders[idx];
-
-            // --- Layer 3: GJK broad check ---
-            const auto hit = Gjk::is_collide_with_simplex_info(map_col, m_collider);
-            if (!hit.hit)
-                continue;
-
-            // --- Layer 4: EPA for penetration vector ---
-            const auto result = Epa::solve(map_col, m_collider, hit.simplex);
-            if (!result)
-                continue;
-
-            m_collider.set_origin(m_collider.get_origin() + (result->penetration_vector * 1.005));
-            const auto up_dot = result->penetration_vector.y / result->penetration_vector.length();
+            const auto& pv = *m_collision_results[i];
+            m_collider.set_origin(m_collider.get_origin() + (pv * 1.005f));
+            const float up_dot = pv.y / pv.length();
 
             if (up_dot > k_floor_dot)
             {
