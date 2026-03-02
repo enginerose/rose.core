@@ -1,12 +1,12 @@
 //
 // Created by orange on 16.02.2026.
 //
+#include "rose/core/collision_world.hpp"
 #include "rose/core/model.hpp"
 #include "rose/core/player.hpp"
 #include "rose/core/window_manager.hpp"
 #include "rose/core/opengl/shader_program.hpp"
 #include <GL/glew.h>
-#include <omath/collision/mesh_collider.hpp>
 #include <omath/engines/opengl_engine/camera.hpp>
 #include <spdlog/spdlog.h>
 #include <imgui_impl_glfw.h>
@@ -59,15 +59,17 @@ namespace rose::core
         glFrontFace(GL_CCW);
         glClearColor(0.3f, 0.3f, 0.3f, 1.f);
 
-        auto map = Model("/home/orange/Downloads/map.glb");
+        auto map = Model("/home/orange/Downloads/map2.glb");
 
-        // Build one MeshCollider per map mesh (copies CPU vertex data once at load time)
+        // Build one MeshCollider per map mesh, then index them into a spatial chunk grid.
         spdlog::info("Building {} map colliders...", map.get_meshes().size());
-        std::vector<omath::collision::MeshCollider<omath::opengl_engine::Mesh>> map_colliders;
-        map_colliders.reserve(map.get_meshes().size());
+        std::vector<CollisionWorld::Collider> raw_colliders;
+        raw_colliders.reserve(map.get_meshes().size());
         for (const auto& mesh : map.get_meshes())
-            map_colliders.emplace_back(mesh.cpu_mesh());
-        spdlog::info("Map colliders ready.");
+            raw_colliders.emplace_back(mesh.cpu_mesh());
+        const auto world = CollisionWorld::build(std::move(raw_colliders));
+        spdlog::info("Collision world ready ({} colliders, chunk size {:.0f} m).",
+                     world.colliders.size(), CollisionWorld::k_chunk_size);
 
         Player player{{0.f, 5.f, 0.f}};
 
@@ -149,7 +151,7 @@ namespace rose::core
                 last_mouse_x = mx;
                 last_mouse_y = my;
             }
-            player.update(delta_time, map_colliders, input);
+            player.update(delta_time, world, input);
             camera.set_origin(player.get_eye_position());
             camera.set_view_angles(player.get_view_angles());
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);

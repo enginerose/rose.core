@@ -3,7 +3,6 @@
 //
 #include "rose/core/player.hpp"
 #include <cmath>
-#include <memory_resource>
 #include <omath/3d_primitives/mesh.hpp>
 #include <omath/collision/epa_algorithm.hpp>
 #include <omath/collision/gjk_algorithm.hpp>
@@ -70,7 +69,7 @@ namespace rose::core
 
     void Player::update(
             float dt,
-            const std::vector<omath::collision::MeshCollider<omath::opengl_engine::Mesh>>& map_colliders,
+            const CollisionWorld& world,
             const PlayerInput& input
     )
     {
@@ -80,34 +79,44 @@ namespace rose::core
         angles.pitch -= decltype(angles.pitch)::from_degrees(input.mouse_dy * k_mouse_sensitivity);
         m_view_angles = angles;
 
-        // --- Horizontal movement (ignores pitch, FPS style) ---
+        // --- Build wish direction from input (ignores pitch, FPS style) ---
         const float yaw_rad = m_view_angles.yaw.as_radians();
         const omath::Vector3<float> forward = {-std::sin(yaw_rad), 0.f, -std::cos(yaw_rad)};
-        const omath::Vector3<float> right = {std::cos(yaw_rad), 0.f, -std::sin(yaw_rad)};
+        const omath::Vector3<float> right   = {std::cos(yaw_rad),  0.f, -std::sin(yaw_rad)};
 
-        omath::Vector3<float> move_dir = {0.f, 0.f, 0.f};
-        if (input.forward)
-            move_dir = move_dir + forward;
-        if (input.backward)
-            move_dir = move_dir - forward;
-        if (input.right)
-            move_dir = move_dir + right;
-        if (input.left)
-            move_dir = move_dir - right;
+        omath::Vector3<float> wish_dir = {0.f, 0.f, 0.f};
+        if (input.forward)  wish_dir = wish_dir + forward;
+        if (input.backward) wish_dir = wish_dir - forward;
+        if (input.right)    wish_dir = wish_dir + right;
+        if (input.left)     wish_dir = wish_dir - right;
 
-        // Normalise horizontal direction
-        const float move_len_sq = move_dir.x * move_dir.x + move_dir.z * move_dir.z;
-        if (move_len_sq > 1e-6f)
+        // Normalise wish direction (horizontal only)
+        const float wish_len_sq = wish_dir.x * wish_dir.x + wish_dir.z * wish_dir.z;
+        if (wish_len_sq > 1e-6f)
         {
-            const float inv = 1.f / std::sqrt(move_len_sq);
-            move_dir.x *= inv;
-            move_dir.z *= inv;
+            const float inv = 1.f / std::sqrt(wish_len_sq);
+            wish_dir.x *= inv;
+            wish_dir.z *= inv;
+        }
+
+        // --- Quake/Source velocity-based horizontal movement ---
+        // On ground: friction first, then high-accel ground movement (capped at k_move_speed).
+        // In air:    low accel with no per-frame speed cap — strafing while airborne
+        //            accumulates speed (the bhop mechanic).
+        if (m_is_grounded)
+        {
+            apply_friction(dt);
+            accelerate(wish_dir, k_move_speed, k_ground_accel, dt);
+        }
+        else
+        {
+            accelerate(wish_dir, k_move_speed, k_air_accel, dt);
         }
 
         auto position = m_collider.get_origin();
 
-        position.x += move_dir.x * k_move_speed * dt;
-        position.z += move_dir.z * k_move_speed * dt;
+        position.x += m_velocity.x * dt;
+        position.z += m_velocity.z * dt;
 
         // --- Jump & gravity ---
         if (input.jump && m_is_grounded)
@@ -120,30 +129,49 @@ namespace rose::core
 
         position.y += m_velocity.y * dt;
 
-        // --- Collision resolution (3 passes to handle multiple simultaneous contacts) ---
+        // --- Collision resolution (multiple passes to handle simultaneous contacts) ---
         m_is_grounded = false;
         m_collider.set_origin(position);
 
-        for (int i = 0; i < 1; i++)
-            resolve_collisions(map_colliders);
+        for (int i = 0; i < 5; i++)
+            resolve_collisions(world);
     }
 
-    void Player::resolve_collisions(
-            const std::vector<omath::collision::MeshCollider<omath::opengl_engine::Mesh>>& map_colliders
-    )
+    // ---------------------------------------------------------------------------
+    // resolve_collisions — two-layer broadphase before GJK + EPA:
+    //   1. Chunk grid  — query only colliders whose chunks overlap the player AABB.
+    //   2. AABB check  — fast axis-aligned overlap test against each candidate.
+    //   3. GJK         — exact convex-shape intersection test.
+    //   4. EPA         — penetration vector for depenetration.
+    // ---------------------------------------------------------------------------
+    void Player::resolve_collisions(const CollisionWorld& world)
     {
-        // Fixed arena: avoids heap allocation in the collision hot path.
-        // release() resets the arena pointer to the buffer start in O(1) after each
-        // EPA call, so the same 32 KB is reused for every collider test.
+        const auto pos = m_collider.get_origin();
 
-        for (const auto& map_col : map_colliders)
+        // Player world-space AABB (exact, since the player collider is an AABB).
+        const Aabb player_aabb{
+            {pos.x - k_half_width, pos.y - k_half_height, pos.z - k_half_depth},
+            {pos.x + k_half_width, pos.y + k_half_height, pos.z + k_half_depth}
+        };
+
+        // --- Layer 1: chunk query (reuses m_query_buf to avoid per-frame alloc) ---
+        m_query_buf.clear();
+        world.query(player_aabb, m_query_buf);
+
+        for (const int idx : m_query_buf)
         {
-            // --- Broad GJK check ---
+            // --- Layer 2: AABB vs AABB ---
+            if (!player_aabb.overlaps(world.aabbs[idx]))
+                continue;
+
+            const auto& map_col = world.colliders[idx];
+
+            // --- Layer 3: GJK broad check ---
             const auto hit = Gjk::is_collide_with_simplex_info(map_col, m_collider);
             if (!hit.hit)
                 continue;
 
-            // --- EPA for penetration vector ---
+            // --- Layer 4: EPA for penetration vector ---
             const auto result = Epa::solve(map_col, m_collider, hit.simplex);
             if (!result)
                 continue;
@@ -151,8 +179,6 @@ namespace rose::core
             m_collider.set_origin(m_collider.get_origin() + (result->penetration_vector * 1.005));
             const auto up_dot = result->penetration_vector.y / result->penetration_vector.length();
 
-
-            m_is_grounded = false;
             if (up_dot > k_floor_dot)
             {
                 m_is_grounded = true;
@@ -161,11 +187,56 @@ namespace rose::core
             }
             else if (up_dot < -k_floor_dot)
             {
-                m_is_grounded = false;
                 if (m_velocity.y > 0.f)
                     m_velocity.y = 0.f;
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Quake-style friction: decelerate horizontal velocity when on the ground.
+    // Uses a "control" speed floor (k_stop_speed) so very slow movement still
+    // bleeds off cleanly instead of hanging at near-zero speed forever.
+    // ---------------------------------------------------------------------------
+    void Player::apply_friction(const float dt)
+    {
+        const float speed = std::sqrt(m_velocity.x * m_velocity.x + m_velocity.z * m_velocity.z);
+        if (speed < 1e-6f)
+            return;
+
+        const float control   = (speed < k_stop_speed) ? k_stop_speed : speed;
+        const float drop      = control * k_friction * dt;
+        const float new_speed = std::max(speed - drop, 0.f);
+        const float scale     = new_speed / speed;
+        m_velocity.x *= scale;
+        m_velocity.z *= scale;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Quake/Source accelerate: add velocity toward wish_dir without exceeding
+    // wish_speed in that direction.  Using a low accel value in air (k_air_accel)
+    // lets the player steer their momentum while airborne — strafing left/right
+    // while looking slightly off the velocity vector adds a tiny push each frame,
+    // accumulating speed across hops (bunny-hopping).
+    // ---------------------------------------------------------------------------
+    void Player::accelerate(
+        const omath::Vector3<float>& wish_dir,
+        const float                  wish_speed,
+        const float                  accel,
+        const float                  dt)
+    {
+        // How fast we're already moving in the desired direction
+        const float current_speed = m_velocity.x * wish_dir.x + m_velocity.z * wish_dir.z;
+        const float add_speed     = wish_speed - current_speed;
+        if (add_speed <= 0.f)
+            return;
+
+        float accel_speed = accel * wish_speed * dt;
+        if (accel_speed > add_speed)
+            accel_speed = add_speed;
+
+        m_velocity.x += accel_speed * wish_dir.x;
+        m_velocity.z += accel_speed * wish_dir.z;
     }
 
     omath::Vector3<float> Player::get_eye_position() const

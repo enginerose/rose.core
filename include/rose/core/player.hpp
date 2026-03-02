@@ -2,9 +2,8 @@
 // Created by orange on 26.02.2026.
 //
 #pragma once
-#include <omath/collision/mesh_collider.hpp>
+#include "rose/core/collision_world.hpp"
 #include <omath/engines/opengl_engine/constants.hpp>
-#include <omath/engines/opengl_engine/mesh.hpp>
 #include <omath/linear_algebra/vector3.hpp>
 #include <vector>
 
@@ -41,11 +40,17 @@ namespace rose::core
         // dot(resolve_vec_normalised, up) threshold to count a surface as floor
         static constexpr float k_floor_dot = 0.65f;
 
+        // Quake/Source bhop physics
+        static constexpr float k_ground_accel = 250.f;  // snappy ground acceleration
+        static constexpr float k_air_accel    = 4.f;   // air-strafe acceleration (enables bhop speed gain)
+        static constexpr float k_friction     = 10.f;    // ground friction coefficient
+        static constexpr float k_stop_speed   = 2.f;    // speed threshold for full-friction clamp
+
         explicit Player(const omath::Vector3<float>& position);
 
         void update(
             float dt,
-            const std::vector<omath::collision::MeshCollider<omath::opengl_engine::Mesh>>& map_colliders,
+            const CollisionWorld& world,
             const PlayerInput& input);
 
         [[nodiscard]] omath::Vector3<float>                   get_eye_position() const;
@@ -60,7 +65,12 @@ namespace rose::core
         // Convex box collider — vertices stored in local space, origin = m_position
         omath::collision::MeshCollider<omath::opengl_engine::Mesh> m_collider;
 
-        void resolve_collisions(
-            const std::vector<omath::collision::MeshCollider<omath::opengl_engine::Mesh>>& map_colliders);
+        void resolve_collisions(const CollisionWorld& world);
+
+        void apply_friction(float dt);
+        void accelerate(const omath::Vector3<float>& wish_dir, float wish_speed, float accel, float dt);
+
+        // Reused scratch buffer for chunk query results — avoids per-call heap alloc.
+        std::vector<int> m_query_buf;
     };
 } // namespace rose::core
