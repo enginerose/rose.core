@@ -10,6 +10,7 @@
     "opengl",
     "spdlog",
     "boost-dll",
+    "asio",
     {
       "name": "imgui",
       "features": [
