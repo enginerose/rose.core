@@ -120,8 +120,8 @@ namespace rose::core
                     }
 
             // Remove duplicates (player may span multiple chunks).
-            std::sort(out.begin(), out.end());
-            out.erase(std::unique(out.begin(), out.end()), out.end());
+            std::ranges::sort(out);
+            out.erase(std::ranges::unique(out).begin(), out.end());
         }
 
     private:
