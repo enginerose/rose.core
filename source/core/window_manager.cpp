@@ -4,6 +4,7 @@
 #include "rose/core/collision_world.hpp"
 #include "rose/core/model.hpp"
 #include "rose/core/player.hpp"
+#include "rose/core/thread_pool.hpp"
 #include "rose/core/window_manager.hpp"
 #include "rose/core/opengl/shader_program.hpp"
 #include <GL/glew.h>
@@ -71,7 +72,8 @@ namespace rose::core
         spdlog::info("Collision world ready ({} colliders, chunk size {:.0f} m).",
                      world.colliders.size(), CollisionWorld::k_chunk_size);
 
-        Player player{{0.f, 5.f, 0.f}};
+        ThreadPool thread_pool;
+        Player player{{0.f, 5.f, 0.f}, thread_pool};
 
         omath::opengl_engine::Camera camera{
             player.get_eye_position(),
@@ -157,7 +159,7 @@ namespace rose::core
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             shader_program.use();
             shader_program.set_mat4("uMVP", camera.get_view_projection_matrix().raw_array().data());
-            map.draw(shader_program);
+            map.draw(shader_program, camera, thread_pool);
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             int fb_w, fb_h;

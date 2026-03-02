@@ -63,7 +63,9 @@ namespace rose::core
     // ---------------------------------------------------------------------------
     // Player
     // ---------------------------------------------------------------------------
-    Player::Player(const omath::Vector3<float>& position): m_collider(make_box_collider())
+    Player::Player(const omath::Vector3<float>& position, ThreadPool& thread_pool)
+        : m_collider(make_box_collider())
+        , m_thread_pool(thread_pool)
     {
         m_collider.set_origin(position);
     }
@@ -134,7 +136,7 @@ namespace rose::core
         m_is_grounded = false;
         m_collider.set_origin(position);
 
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 2; i++)
             resolve_collisions(world);
     }
 

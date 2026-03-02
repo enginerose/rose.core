@@ -273,10 +273,92 @@ namespace rose::core
 
     Model::Model(const std::filesystem::path& path) { load(path); }
 
-    void Model::draw(const opengl::ShaderProgram& shader) const
+    // ---------------------------------------------------------------------------
+    // AABB vs frustum — Gribb-Hartmann method.
+    //
+    // For each of the 6 clip half-spaces (±x, ±y, ±z in NDC), we compute the
+    // "P-vertex" of the AABB: the corner that maximises the signed distance into
+    // that half-space.  If even the P-vertex is outside (signed distance < 0),
+    // all 8 corners are outside → AABB is definitely culled.
+    //
+    // Plane coefficients are extracted from the view-projection matrix VP
+    // (column-major, .at(row, col)):
+    //   clip[i] = sum_j VP.at(i,j) * p[j]
+    //   clip[3] = sum_j VP.at(3,j) * p[j]   (w component)
+    //
+    // Inside condition for the -i half-space: clip[i] + clip[3] ≥ 0
+    //   → outside: (VP.at(i,j) + VP.at(3,j)) · p + (VP.at(i,3) + VP.at(3,3)) < 0
+    // Inside condition for the +i half-space: -clip[i] + clip[3] ≥ 0
+    //   → outside: (-VP.at(i,j) + VP.at(3,j)) · p + (-VP.at(i,3) + VP.at(3,3)) < 0
+    // ---------------------------------------------------------------------------
+    static bool is_aabb_culled_by_frustum(
+        const omath::opengl_engine::Camera& camera,
+        const Aabb& aabb) noexcept
     {
-        for (const auto& mesh : m_meshes)
-            mesh.draw(shader);
+        const auto& vp = camera.get_view_projection_matrix();
+
+        for (int i = 0; i < 3; ++i)
+        {
+            for (const int s : {1, -1})   // s=+1 → -i half-space, s=-1 → +i half-space
+            {
+                const float a0 = vp.at(3, 0) + s * vp.at(i, 0);
+                const float a1 = vp.at(3, 1) + s * vp.at(i, 1);
+                const float a2 = vp.at(3, 2) + s * vp.at(i, 2);
+                const float d  = vp.at(3, 3) + s * vp.at(i, 3);
+
+                // P-vertex: the AABB corner that maximises a · p + d
+                const float px = a0 > 0.f ? aabb.max.x : aabb.min.x;
+                const float py = a1 > 0.f ? aabb.max.y : aabb.min.y;
+                const float pz = a2 > 0.f ? aabb.max.z : aabb.min.z;
+
+                if (a0 * px + a1 * py + a2 * pz + d < 0.f)
+                    return true; // all 8 corners outside this frustum plane → cull
+            }
+        }
+        return false;
+    }
+
+    void Model::draw(const opengl::ShaderProgram& shader,
+                     const omath::opengl_engine::Camera& camera,
+                     ThreadPool& pool) const
+    {
+        const int n = static_cast<int>(m_meshes.size());
+        if (n == 0) return;
+
+        // Warm the VP matrix lazy cache on the main thread before workers read it.
+        (void)camera.get_view_projection_matrix();
+
+        // Parallel frustum cull — each worker tests its slice of AABBs.
+        // Use uint8_t: std::vector<bool> packs bits and is unsafe for concurrent writes.
+        std::vector<uint8_t> visible(static_cast<size_t>(n), 0);
+
+        const int n_tasks = std::min(n, pool.size());
+        const int chunk   = (n + n_tasks - 1) / n_tasks;
+
+        std::vector<std::future<void>> futures;
+        futures.reserve(n_tasks);
+
+        for (int t = 0; t < n_tasks; ++t)
+        {
+            const int begin = t * chunk;
+            if (begin >= n) break;
+            const int end = std::min(begin + chunk, n);
+
+            futures.push_back(pool.submit([&, begin, end]
+            {
+                for (int i = begin; i < end; ++i)
+                    visible[static_cast<size_t>(i)] =
+                        is_aabb_culled_by_frustum(camera, m_mesh_aabbs[i]) ? 0u : 1u;
+            }));
+        }
+
+        for (auto& f : futures)
+            f.get();
+
+        // Serial draw — OpenGL calls must stay on the main thread.
+        for (int i = 0; i < n; ++i)
+            if (visible[static_cast<size_t>(i)])
+                m_meshes[i].draw(shader);
     }
 
     void Model::load(const std::filesystem::path& path)
@@ -329,5 +411,10 @@ namespace rose::core
                 m_meshes.push_back(std::move(mesh));
             }
         }
+
+        // Pre-compute world-space AABBs once — used every frame for frustum culling.
+        m_mesh_aabbs.reserve(m_meshes.size());
+        for (const auto& mesh : m_meshes)
+            m_mesh_aabbs.push_back(Aabb::from_mesh(mesh.cpu_mesh()));
     }
 } // namespace rose::core

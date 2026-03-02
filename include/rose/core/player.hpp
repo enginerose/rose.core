@@ -48,7 +48,7 @@ namespace rose::core
         static constexpr float k_friction     = 10.f;    // ground friction coefficient
         static constexpr float k_stop_speed   = 2.f;    // speed threshold for full-friction clamp
 
-        explicit Player(const omath::Vector3<float>& position);
+        explicit Player(const omath::Vector3<float>& position, ThreadPool& thread_pool);
 
         void update(
             float dt,
@@ -76,7 +76,7 @@ namespace rose::core
         std::vector<int>                                   m_query_buf;
         std::vector<std::optional<omath::Vector3<float>>>  m_collision_results;
 
-        // Persistent thread pool — workers are created once and reused every frame.
-        ThreadPool m_thread_pool;
+        // Reference to the shared thread pool owned by window_manager.
+        ThreadPool& m_thread_pool;
     };
 } // namespace rose::core

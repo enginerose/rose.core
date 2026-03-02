@@ -2,10 +2,14 @@
 // Created by orange on 25.02.2026.
 //
 #pragma once
+#include "rose/core/collision_world.hpp"
+#include "rose/core/opengl/mesh.hpp"
+#include "rose/core/opengl/shader_program.hpp"
+#include "rose/core/thread_pool.hpp"
+#include <omath/engines/opengl_engine/camera.hpp>
+#include <omath/engines/opengl_engine/mesh.hpp>
 #include <filesystem>
 #include <vector>
-#include <omath/engines/opengl_engine/mesh.hpp>
-#include "rose/core/opengl/mesh.hpp"
 
 namespace rose::core
 {
@@ -32,11 +36,16 @@ namespace rose::core
 
         [[nodiscard]] const std::vector<opengl::Mesh>& get_meshes() const { return m_meshes; }
 
-        // Draw all meshes. Caller must call shader.use() before this.
-        void draw(const opengl::ShaderProgram& shader) const;
+        // Draw visible meshes. Frustum culling runs in parallel on the shared thread pool;
+        // actual GL draw calls are issued serially on the calling (main) thread.
+        // Caller must call shader.use() before this.
+        void draw(const opengl::ShaderProgram& shader,
+                  const omath::opengl_engine::Camera& camera,
+                  ThreadPool& pool) const;
 
     private:
         std::vector<opengl::Mesh> m_meshes;
+        std::vector<Aabb>         m_mesh_aabbs; // world-space AABB per mesh, parallel to m_meshes
 
         void load(const std::filesystem::path& path);
     };

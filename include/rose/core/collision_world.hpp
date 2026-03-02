@@ -30,16 +30,15 @@ namespace rose::core
                 && min.z <= o.max.z && max.z >= o.min.z;
         }
 
-        // Build world-space AABB by transforming every vertex through the
-        // collider's to-world matrix.
-        static Aabb from_collider(
-            const omath::collision::MeshCollider<omath::opengl_engine::Mesh>& c)
+        // Build world-space AABB from any omath Mesh by transforming every vertex
+        // through the mesh's to-world matrix.
+        static Aabb from_mesh(const omath::opengl_engine::Mesh& mesh)
         {
             constexpr float inf = std::numeric_limits<float>::max();
             Aabb box{{inf, inf, inf}, {-inf, -inf, -inf}};
-            for (const auto& v : c.m_mesh.m_vertex_buffer)
+            for (const auto& v : mesh.m_vertex_buffer)
             {
-                const auto wp = c.m_mesh.vertex_position_to_world_space(v.position);
+                const auto wp = mesh.vertex_position_to_world_space(v.position);
                 box.min.x = std::min(box.min.x, wp.x);
                 box.min.y = std::min(box.min.y, wp.y);
                 box.min.z = std::min(box.min.z, wp.z);
@@ -48,6 +47,12 @@ namespace rose::core
                 box.max.z = std::max(box.max.z, wp.z);
             }
             return box;
+        }
+
+        static Aabb from_collider(
+            const omath::collision::MeshCollider<omath::opengl_engine::Mesh>& c)
+        {
+            return from_mesh(c.m_mesh);
         }
     };
 
@@ -64,7 +69,7 @@ namespace rose::core
         using Collider = omath::collision::MeshCollider<omath::opengl_engine::Mesh>;
 
         // World is divided into axis-aligned cubes of this side length (metres).
-        static constexpr float k_chunk_size = 16.f;
+        static constexpr float k_chunk_size = 10.f;
 
         std::vector<Collider>                          colliders;
         std::vector<Aabb>                              aabbs;   // parallel to colliders
