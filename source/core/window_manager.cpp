@@ -95,7 +95,6 @@ namespace rose::core
 
         while (true)
         {
-            const auto frame_start = std::chrono::high_resolution_clock::now();
             glfwPollEvents();
 
             if (glfwWindowShouldClose(m_window))
@@ -169,9 +168,6 @@ namespace rose::core
             camera.set_view_port({static_cast<float>(fb_w), static_cast<float>(fb_h)});
             last_time = current_time;
 
-            const auto frame_end = std::chrono::high_resolution_clock::now();
-
-            const auto wait_for = std::chrono::duration_cast<std::chrono::microseconds>(frame_end - frame_start).count();
 
             //std::this_thread::sleep_for(std::chrono::microseconds(8333-wait_for));
         }

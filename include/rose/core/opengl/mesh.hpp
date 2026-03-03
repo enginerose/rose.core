@@ -22,7 +22,7 @@ namespace rose::core::opengl
     class Mesh final
     {
     public:
-        Mesh() = default;
+        Mesh() = delete;
 
         Mesh(omath::opengl_engine::Mesh cpu_mesh, std::vector<MeshTexture> textures)
             : m_cpu_mesh(std::move(cpu_mesh))
