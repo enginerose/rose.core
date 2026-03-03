@@ -178,7 +178,7 @@ namespace rose::core
         m_collision_results.assign(n, std::nullopt);
 
         // Warm the player's lazy world-matrix cache before worker threads read it.
-        (void)m_collider.m_mesh.get_to_world_matrix();
+        std::ignore = m_collider.get_mesh().get_to_world_matrix();
 
         // --- Layers 2–3: parallel AABB check + GJK + EPA ---
         // Partition the candidate list into at most thread_count slices.

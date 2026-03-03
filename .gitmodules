@@ -1,0 +1,3 @@
+[submodule "extlibs/omath"]
+	path = extlibs/omath
+	url = https://github.com/orange-cpp/omath

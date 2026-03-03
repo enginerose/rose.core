@@ -52,7 +52,7 @@ namespace rose::core
         static Aabb from_collider(
             const omath::collision::MeshCollider<omath::opengl_engine::Mesh>& c)
         {
-            return from_mesh(c.m_mesh);
+            return from_mesh(c.get_mesh());
         }
     };
 
