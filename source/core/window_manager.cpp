@@ -1,17 +1,21 @@
 //
 // Created by orange on 16.02.2026.
 //
+#include <GL/glew.h>
+#include "rose/core/window_manager.hpp"
+#include "/home/orange/CLionProjects/rose.stream_plugin/include/cherry_streamer/stream_plugin_api.hpp"
 #include "rose/core/collision_world.hpp"
 #include "rose/core/model.hpp"
+#include "rose/core/opengl/screenshot.hpp"
+#include "rose/core/opengl/shader_program.hpp"
 #include "rose/core/player.hpp"
 #include "rose/core/thread_pool.hpp"
-#include "rose/core/window_manager.hpp"
-#include "rose/core/opengl/shader_program.hpp"
-#include <GL/glew.h>
-#include <omath/engines/opengl_engine/camera.hpp>
-#include <spdlog/spdlog.h>
+#include <boost/dll.hpp>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
+#include <omath/engines/opengl_engine/camera.hpp>
+#include <spdlog/spdlog.h>
+
 static void GlfwErrorCallback(int code, const char* desc)
 {
     spdlog::error("GLFW error {}: {}", code, desc);
@@ -54,6 +58,17 @@ namespace rose::core
 
     void WindowManager::run() const
     {
+        const boost::dll::fs::path lib_path(
+            "/home/orange/CLionProjects/rose.core/plugins/rose.stream.so"
+    ); // argv[1] contains path to directory with our plugin library
+        using pluginapi_create_t = std::shared_ptr<StreamPluginApi>();
+        auto creator = boost::dll::import_alias<pluginapi_create_t>(        // type of imported symbol must be explicitly specified
+            lib_path,                                            // path to library
+            "create_plugin",                                                // symbol to import
+            boost::dll::load_mode::default_mode                              // do append extensions and prefixes
+        );
+        std::shared_ptr<StreamPluginApi> plugin = creator();
+        plugin->run();
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
@@ -72,7 +87,7 @@ namespace rose::core
         spdlog::info("Collision world ready ({} colliders, chunk size {:.0f} m).",
                      world.colliders.size(), CollisionWorld::k_chunk_size);
 
-        ThreadPool thread_pool;
+        ThreadPool thread_pool{};
         Player player{{0.f, 5.f, 0.f}, thread_pool};
 
         omath::opengl_engine::Camera camera{
@@ -165,11 +180,22 @@ namespace rose::core
             glfwGetFramebufferSize(m_window, &fb_w, &fb_h);
             glViewport(0, 0, fb_w, fb_h);
             glfwSwapBuffers(m_window);
+
+            if (plugin->is_ready_to_stream())
+            {
+                auto bmp_data = rose::core::take_screenshot(fb_w, fb_h);
+                plugin->push_frame(bmp_data);
+            }
             camera.set_view_port({static_cast<float>(fb_w), static_cast<float>(fb_h)});
-            last_time = current_time;
 
-
-            //std::this_thread::sleep_for(std::chrono::microseconds(8333-wait_for));
+            // Precise 60 fps cap: sleep most of the budget, then spinwait the tail.
+            static constexpr double k_target_frame_time = 1.0 / 60.0;
+            const double frame_end_target = current_time + k_target_frame_time;
+            const double sleep_until      = frame_end_target - 0.002; // leave 2 ms for spinwait
+            const double now              = glfwGetTime();
+            if (now < sleep_until)
+                std::this_thread::sleep_for(std::chrono::duration<double>(sleep_until - now));
+            while (glfwGetTime() < frame_end_target) {}
         }
     }
 } // namespace rose::core
