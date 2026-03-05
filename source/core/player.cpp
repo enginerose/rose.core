@@ -76,11 +76,53 @@ namespace rose::core
             const PlayerInput& input
     )
     {
+        // --- Noclip toggle (edge-triggered on Q) ---
+        if (input.noclip && !m_noclip_was_pressed)
+        {
+            m_noclip   = !m_noclip;
+            m_velocity = {};
+        }
+        m_noclip_was_pressed = input.noclip;
+
         // --- Mouse look ---
         auto angles = m_view_angles;
         angles.yaw -= decltype(angles.yaw)::from_degrees(input.mouse_dx * k_mouse_sensitivity);
         angles.pitch -= decltype(angles.pitch)::from_degrees(input.mouse_dy * k_mouse_sensitivity);
         m_view_angles = angles;
+
+        // --- Noclip free-cam movement ---
+        if (m_noclip)
+        {
+            const float yaw_rad   = m_view_angles.yaw.as_radians();
+            const float pitch_rad = m_view_angles.pitch.as_radians();
+            const omath::Vector3<float> fwd = {
+                -std::sin(yaw_rad) * std::cos(pitch_rad),
+                 std::sin(pitch_rad),
+                -std::cos(yaw_rad) * std::cos(pitch_rad)
+            };
+            const omath::Vector3<float> rgt = {std::cos(yaw_rad), 0.f, -std::sin(yaw_rad)};
+
+            omath::Vector3<float> move{};
+            if (input.forward)  move = move + fwd;
+            if (input.backward) move = move - fwd;
+            if (input.right)    move = move + rgt;
+            if (input.left)     move = move - rgt;
+            if (input.jump)     move.y += 1.f;
+
+            const float len_sq = move.x*move.x + move.y*move.y + move.z*move.z;
+            if (len_sq > 1e-6f)
+            {
+                const float inv = 1.f / std::sqrt(len_sq);
+                move.x *= inv; move.y *= inv; move.z *= inv;
+            }
+
+            auto pos = m_collider.get_origin();
+            pos.x += move.x * k_move_speed * dt;
+            pos.y += move.y * k_move_speed * dt;
+            pos.z += move.z * k_move_speed * dt;
+            m_collider.set_origin(pos);
+            return;
+        }
 
         // --- Build wish direction from input (ignores pitch, FPS style) ---
         const float yaw_rad = m_view_angles.yaw.as_radians();

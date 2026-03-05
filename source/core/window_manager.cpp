@@ -150,6 +150,7 @@ namespace rose::core
             input.right    = glfwGetKey(m_window, GLFW_KEY_D)     == GLFW_PRESS;
             input.left     = glfwGetKey(m_window, GLFW_KEY_A)     == GLFW_PRESS;
             input.jump     = glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS;
+            input.noclip   = glfwGetKey(m_window, GLFW_KEY_Q)     == GLFW_PRESS;
 
             if (mouse_captured)
             {

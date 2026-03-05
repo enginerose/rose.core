@@ -13,13 +13,14 @@ namespace rose::core
 {
     struct PlayerInput final
     {
-        bool  forward  = false;
-        bool  backward = false;
-        bool  left     = false;
-        bool  right    = false;
-        bool  jump     = false;
-        float mouse_dx = 0.f;
-        float mouse_dy = 0.f;
+        bool  forward   = false;
+        bool  backward  = false;
+        bool  left      = false;
+        bool  right     = false;
+        bool  jump      = false;
+        bool  noclip    = false;
+        float mouse_dx  = 0.f;
+        float mouse_dy  = 0.f;
     };
 
     class Player final
@@ -61,7 +62,9 @@ namespace rose::core
 
     private:
         omath::Vector3<float>           m_velocity{};
-        bool                            m_is_grounded = false;
+        bool                            m_is_grounded  = false;
+        bool                            m_noclip       = false;
+        bool                            m_noclip_was_pressed = false;
         omath::opengl_engine::ViewAngles m_view_angles{};
 
         // Convex box collider — vertices stored in local space, origin = m_position
