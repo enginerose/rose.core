@@ -6,3 +6,4 @@
 /build/
 /clang-coverage/
 *.gcov
+*.so

@@ -9,7 +9,6 @@
 #include "rose/core/opengl/screenshot.hpp"
 #include "rose/core/opengl/shader_program.hpp"
 #include "rose/core/player.hpp"
-#include "rose/core/thread_pool.hpp"
 #include <boost/dll.hpp>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -87,8 +86,7 @@ namespace rose::core
         spdlog::info("Collision world ready ({} colliders, chunk size {:.0f} m).",
                      world.colliders.size(), CollisionWorld::k_chunk_size);
 
-        ThreadPool thread_pool{};
-        Player player{{0.f, 5.f, 0.f}, thread_pool};
+        Player player{{0.f, 5.f, 0.f}};
 
         omath::opengl_engine::Camera camera{
             player.get_eye_position(),
@@ -103,10 +101,10 @@ namespace rose::core
 
         bool   mouse_captured  = false;
         bool   esc_was_pressed = false;
-        bool   first_mouse     = true;
-        double last_mouse_x    = 0.0;
-        double last_mouse_y    = 0.0;
-        double last_time       = glfwGetTime();
+        bool   first_mouse  = true;
+        double last_mouse_x = 0.0;
+        double last_mouse_y = 0.0;
+        double last_time    = glfwGetTime();
 
         while (true)
         {
@@ -174,7 +172,7 @@ namespace rose::core
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             shader_program.use();
             shader_program.set_mat4("uMVP", camera.get_view_projection_matrix().raw_array().data());
-            map.draw(shader_program, camera, thread_pool);
+            map.draw(shader_program, camera);
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             int fb_w, fb_h;

@@ -3,14 +3,13 @@
 //
 #pragma once
 #include "rose/core/collision_world.hpp"
-#include "rose/core/thread_pool.hpp"
 #include <omath/engines/opengl_engine/constants.hpp>
 #include <omath/linear_algebra/vector3.hpp>
-#include <optional>
 #include <vector>
 
 namespace rose::core
 {
+
     struct PlayerInput final
     {
         bool  forward   = false;
@@ -36,20 +35,14 @@ namespace rose::core
         static constexpr float k_eye_height = 1.25f;
 
         static constexpr float k_move_speed       = 10.f;
-        static constexpr float k_jump_speed        = 10.f;
-        static constexpr float k_gravity           = -20.f;
+        static constexpr float k_jump_speed       = 10.f;
+        static constexpr float k_gravity          = -20.f;
         static constexpr float k_mouse_sensitivity = 0.1f;
 
         // dot(resolve_vec_normalised, up) threshold to count a surface as floor
         static constexpr float k_floor_dot = 0.65f;
 
-        // Quake/Source bhop physics
-        static constexpr float k_ground_accel = 250.f;  // snappy ground acceleration
-        static constexpr float k_air_accel    = 4.f;   // air-strafe acceleration (enables bhop speed gain)
-        static constexpr float k_friction     = 10.f;    // ground friction coefficient
-        static constexpr float k_stop_speed   = 2.f;    // speed threshold for full-friction clamp
-
-        explicit Player(const omath::Vector3<float>& position, ThreadPool& thread_pool);
+        explicit Player(const omath::Vector3<float>& position);
 
         void update(
             float dt,
@@ -66,20 +59,15 @@ namespace rose::core
         bool                            m_noclip       = false;
         bool                            m_noclip_was_pressed = false;
         omath::opengl_engine::ViewAngles m_view_angles{};
+        float m_smooth_dx = 0.f;
+        float m_smooth_dy = 0.f;
 
         // Convex box collider — vertices stored in local space, origin = m_position
         omath::collision::MeshCollider<omath::opengl_engine::Mesh> m_collider;
 
         void resolve_collisions(const CollisionWorld& world);
 
-        void apply_friction(float dt);
-        void accelerate(const omath::Vector3<float>& wish_dir, float wish_speed, float accel, float dt);
-
-        // Reused scratch buffers — both grown to capacity once, cleared each pass.
-        std::vector<int>                                   m_query_buf;
-        std::vector<std::optional<omath::Vector3<float>>>  m_collision_results;
-
-        // Reference to the shared thread pool owned by window_manager.
-        ThreadPool& m_thread_pool;
+        // Reused scratch buffer — grown to capacity once, cleared each pass.
+        std::vector<int> m_query_buf;
     };
 } // namespace rose::core

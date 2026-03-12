@@ -319,45 +319,10 @@ namespace rose::core
     }
 
     void Model::draw(const opengl::ShaderProgram& shader,
-                     const omath::opengl_engine::Camera& camera,
-                     ThreadPool& pool) const
+                     const omath::opengl_engine::Camera& camera) const
     {
-        const int n = static_cast<int>(m_meshes.size());
-        if (n == 0) return;
-
-        // Warm the VP matrix lazy cache on the main thread before workers read it.
-        (void)camera.get_view_projection_matrix();
-
-        // Parallel frustum cull — each worker tests its slice of AABBs.
-        // Use uint8_t: std::vector<bool> packs bits and is unsafe for concurrent writes.
-        std::vector<uint8_t> visible(static_cast<size_t>(n), 0);
-
-        const int n_tasks = std::min(n, pool.size());
-        const int chunk   = (n + n_tasks - 1) / n_tasks;
-
-        std::vector<std::future<void>> futures;
-        futures.reserve(n_tasks);
-
-        for (int t = 0; t < n_tasks; ++t)
-        {
-            const int begin = t * chunk;
-            if (begin >= n) break;
-            const int end = std::min(begin + chunk, n);
-
-            futures.push_back(pool.submit([&, begin, end]
-            {
-                for (int i = begin; i < end; ++i)
-                    visible[static_cast<size_t>(i)] =
-                        is_aabb_culled_by_frustum(camera, m_mesh_aabbs[i]) ? 0u : 1u;
-            }));
-        }
-
-        for (auto& f : futures)
-            f.get();
-
-        // Serial draw — OpenGL calls must stay on the main thread.
-        for (int i = 0; i < n; ++i)
-            if (visible[static_cast<size_t>(i)])
+        for (int i = 0; i < static_cast<int>(m_meshes.size()); ++i)
+            if (!is_aabb_culled_by_frustum(camera, m_mesh_aabbs[i]))
                 m_meshes[i].draw(shader);
     }
 
