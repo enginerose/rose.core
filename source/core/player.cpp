@@ -171,6 +171,8 @@ namespace rose::core
         else
         {
             accelerate(wish_dir, wish_speed, k_air_accel, dt);
+            if (wish_speed > 0.f)
+                air_control(wish_dir, dt);
         }
 
         // --- Gravity ---
@@ -229,6 +231,30 @@ namespace rose::core
 
         m_velocity.x *= new_speed;
         m_velocity.z *= new_speed;
+    }
+
+    void Player::air_control(const omath::Vector3<float>& wish_dir, float dt)
+    {
+        const float speed = std::sqrt(m_velocity.x * m_velocity.x + m_velocity.z * m_velocity.z);
+        if (speed < 0.1f)
+            return;
+
+        // Rotate horizontal velocity direction toward wish_dir, preserving speed
+        const float inv = 1.f / speed;
+        const float vx = m_velocity.x * inv;
+        const float vz = m_velocity.z * inv;
+
+        const float max_turn = k_air_control * dt;
+        const float t = std::min(max_turn, 1.f);
+
+        const float new_x = vx + (wish_dir.x - vx) * t;
+        const float new_z = vz + (wish_dir.z - vz) * t;
+        const float len = std::sqrt(new_x * new_x + new_z * new_z);
+        if (len < 1e-6f)
+            return;
+
+        m_velocity.x = (new_x / len) * speed;
+        m_velocity.z = (new_z / len) * speed;
     }
 
     void Player::resolve_collisions(const CollisionWorld& world)

@@ -36,7 +36,8 @@ namespace rose::core
 
         static constexpr float k_max_speed         = 10.f;   // wish speed cap
         static constexpr float k_ground_accel      = 10.f;   // ground acceleration multiplier
-        static constexpr float k_air_accel         = 12.f;   // air acceleration multiplier
+        static constexpr float k_air_accel         = 2.f;    // air acceleration multiplier
+        static constexpr float k_air_control       = 1.f;    // air direction steering rate (rad/s)
         static constexpr float k_friction          = 6.f;    // ground friction
         static constexpr float k_stop_speed        = 1.f;    // min speed for friction reference
         static constexpr float k_jump_speed        = 10.f;
@@ -73,6 +74,7 @@ namespace rose::core
         void resolve_collisions(const CollisionWorld& world);
         void accelerate(const omath::Vector3<float>& wish_dir, float wish_speed, float accel, float dt);
         void apply_friction(float dt);
+        void air_control(const omath::Vector3<float>& wish_dir, float dt);
 
         // Reused scratch buffer — grown to capacity once, cleared each pass.
         std::vector<int> m_query_buf;
