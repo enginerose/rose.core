@@ -34,9 +34,13 @@ namespace rose::core
         // Eye height above m_position centre (~1.65 m above feet)
         static constexpr float k_eye_height = 1.25f;
 
-        static constexpr float k_move_speed       = 10.f;
-        static constexpr float k_jump_speed       = 10.f;
-        static constexpr float k_gravity          = -20.f;
+        static constexpr float k_max_speed         = 10.f;   // wish speed cap
+        static constexpr float k_ground_accel      = 10.f;   // ground acceleration multiplier
+        static constexpr float k_air_accel         = 12.f;   // air acceleration multiplier
+        static constexpr float k_friction          = 6.f;    // ground friction
+        static constexpr float k_stop_speed        = 1.f;    // min speed for friction reference
+        static constexpr float k_jump_speed        = 10.f;
+        static constexpr float k_gravity           = -20.f;
         static constexpr float k_mouse_sensitivity = 0.1f;
 
         // dot(resolve_vec_normalised, up) threshold to count a surface as floor
@@ -56,6 +60,7 @@ namespace rose::core
     private:
         omath::Vector3<float>           m_velocity{};
         bool                            m_is_grounded  = false;
+        bool                            m_jump_queued  = false;
         bool                            m_noclip       = false;
         bool                            m_noclip_was_pressed = false;
         omath::opengl_engine::ViewAngles m_view_angles{};
@@ -66,6 +71,8 @@ namespace rose::core
         omath::collision::MeshCollider<omath::opengl_engine::Mesh> m_collider;
 
         void resolve_collisions(const CollisionWorld& world);
+        void accelerate(const omath::Vector3<float>& wish_dir, float wish_speed, float accel, float dt);
+        void apply_friction(float dt);
 
         // Reused scratch buffer — grown to capacity once, cleared each pass.
         std::vector<int> m_query_buf;

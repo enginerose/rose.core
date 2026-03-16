@@ -118,44 +118,66 @@ namespace rose::core
             }
 
             auto pos = m_collider.get_origin();
-            pos.x += move.x * k_move_speed * dt;
-            pos.y += move.y * k_move_speed * dt;
-            pos.z += move.z * k_move_speed * dt;
+            pos.x += move.x * k_max_speed * dt;
+            pos.y += move.y * k_max_speed * dt;
+            pos.z += move.z * k_max_speed * dt;
             m_collider.set_origin(pos);
             return;
         }
 
-        // --- Horizontal movement ---
+        // --- Build wish direction from input ---
         const float yaw_rad = m_view_angles.yaw.as_radians();
         const omath::Vector3<float> forward = {-std::sin(yaw_rad), 0.f, -std::cos(yaw_rad)};
         const omath::Vector3<float> right   = {std::cos(yaw_rad),  0.f, -std::sin(yaw_rad)};
 
-        omath::Vector3<float> move_dir{};
-        if (input.forward)  move_dir = move_dir + forward;
-        if (input.backward) move_dir = move_dir - forward;
-        if (input.right)    move_dir = move_dir + right;
-        if (input.left)     move_dir = move_dir - right;
+        omath::Vector3<float> wish_dir{};
+        if (input.forward)  wish_dir = wish_dir + forward;
+        if (input.backward) wish_dir = wish_dir - forward;
+        if (input.right)    wish_dir = wish_dir + right;
+        if (input.left)     wish_dir = wish_dir - right;
 
-        const float len_sq = move_dir.x * move_dir.x + move_dir.z * move_dir.z;
+        const float len_sq = wish_dir.x * wish_dir.x + wish_dir.z * wish_dir.z;
+        float wish_speed = 0.f;
         if (len_sq > 1e-6f)
         {
             const float inv = 1.f / std::sqrt(len_sq);
-            move_dir.x *= inv;
-            move_dir.z *= inv;
+            wish_dir.x *= inv;
+            wish_dir.z *= inv;
+            wish_speed = k_max_speed;
         }
 
-        m_velocity.x = move_dir.x * k_move_speed;
-        m_velocity.z = move_dir.z * k_move_speed;
+        // --- Queue jump for bhop ---
+        if (input.jump)
+            m_jump_queued = true;
+        else
+            m_jump_queued = false;
 
-        // --- Jump & gravity ---
-        if (input.jump && m_is_grounded)
+        // --- Ground / air movement ---
+        if (m_is_grounded)
         {
-            m_velocity.y  = k_jump_speed;
-            m_is_grounded = false;
+            if (m_jump_queued)
+            {
+                // Bhop: jump immediately, skip friction to preserve speed
+                m_velocity.y  = k_jump_speed;
+                m_is_grounded = false;
+                m_jump_queued = false;
+            }
+            else
+            {
+                apply_friction(dt);
+            }
+            accelerate(wish_dir, wish_speed, k_ground_accel, dt);
         }
+        else
+        {
+            accelerate(wish_dir, wish_speed, k_air_accel, dt);
+        }
+
+        // --- Gravity ---
         if (!m_is_grounded)
             m_velocity.y += k_gravity * dt;
 
+        // --- Integrate position ---
         auto position = m_collider.get_origin();
         position.x += m_velocity.x * dt;
         position.y += m_velocity.y * dt;
@@ -167,6 +189,46 @@ namespace rose::core
 
         for (int i = 0; i < 5; i++)
             resolve_collisions(world);
+    }
+
+    void Player::accelerate(
+            const omath::Vector3<float>& wish_dir,
+            float wish_speed,
+            float accel,
+            float dt)
+    {
+        const float current_speed = m_velocity.x * wish_dir.x + m_velocity.z * wish_dir.z;
+        const float add_speed = wish_speed - current_speed;
+        if (add_speed <= 0.f)
+            return;
+
+        float accel_speed = accel * wish_speed * dt;
+        if (accel_speed > add_speed)
+            accel_speed = add_speed;
+
+        m_velocity.x += accel_speed * wish_dir.x;
+        m_velocity.z += accel_speed * wish_dir.z;
+    }
+
+    void Player::apply_friction(float dt)
+    {
+        const float speed = std::sqrt(m_velocity.x * m_velocity.x + m_velocity.z * m_velocity.z);
+        if (speed < 0.1f)
+        {
+            m_velocity.x = 0.f;
+            m_velocity.z = 0.f;
+            return;
+        }
+
+        const float control = speed < k_stop_speed ? k_stop_speed : speed;
+        const float drop = control * k_friction * dt;
+        float new_speed = speed - drop;
+        if (new_speed < 0.f)
+            new_speed = 0.f;
+        new_speed /= speed;
+
+        m_velocity.x *= new_speed;
+        m_velocity.z *= new_speed;
     }
 
     void Player::resolve_collisions(const CollisionWorld& world)
