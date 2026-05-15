@@ -7,12 +7,14 @@ file(GLOB_RECURSE ROSE_SOURCES source/*.cpp)
 
 add_executable(${PROJECT_NAME} ${ROSE_HEADERS} ${ROSE_SOURCES})
 
+set(OMATH_STATIC_MSVC_RUNTIME_LIBRARY ON)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
         CXX_STANDARD 23
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out/${CMAKE_BUILD_TYPE}"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out/${CMAKE_BUILD_TYPE}"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out/${CMAKE_BUILD_TYPE}"
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE include)
@@ -37,6 +39,6 @@ find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(asio CONFIG REQUIRED)
 
 add_subdirectory(extlibs/omath)
-target_link_libraries(${PROJECT_NAME} PRIVATE asio::asio imgui::imgui omath::omath GLEW::GLEW glfw OpenGL::GL spdlog::spdlog Boost::dll)
+target_link_libraries(${PROJECT_NAME} PRIVATE asio::asio imgui::imgui omath::omath GLEW::GLEW glfw OpenGL::GL spdlog::spdlog Boost::dll winmm)
 target_link_libraries(${PROJECT_NAME} PRIVATE)
 target_include_directories(${PROJECT_NAME} PRIVATE ${TINYGLTF_INCLUDE_DIRS})

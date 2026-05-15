@@ -1,9 +1,11 @@
 //
 // Created by orange on 16.02.2026.
 //
+#include <windows.h>
+#include <timeapi.h>
 #include <GL/glew.h>
 #include "rose/core/window_manager.hpp"
-#include "/home/orange/CLionProjects/rose.stream_plugin/include/cherry_streamer/stream_plugin_api.hpp"
+#include "rose/plugins/plugin_sdk.hpp"
 #include "rose/core/collision_world.hpp"
 #include "rose/core/model.hpp"
 #include "rose/core/opengl/screenshot.hpp"
@@ -48,6 +50,7 @@ namespace rose::core
             std::terminate();
         }
 
+        timeBeginPeriod(1); // Set Windows timer resolution to 1ms
         glfwSwapInterval(0);
         ImGui::CreateContext();
         ImGui_ImplGlfw_InitForOpenGL(m_window, true);
@@ -58,7 +61,7 @@ namespace rose::core
     void WindowManager::run() const
     {
         const boost::dll::fs::path lib_path(
-            "/home/orange/CLionProjects/rose.core/plugins/rose.stream.so"
+            "rose.stream.dll"
     ); // argv[1] contains path to directory with our plugin library
         using pluginapi_create_t = std::shared_ptr<StreamPluginApi>();
         auto creator = boost::dll::import_alias<pluginapi_create_t>(        // type of imported symbol must be explicitly specified
@@ -74,7 +77,7 @@ namespace rose::core
         glFrontFace(GL_CCW);
         glClearColor(0.3f, 0.3f, 0.3f, 1.f);
 
-        auto map = Model("/home/orange/Downloads/map2.glb");
+        auto map = Model("map2.glb");
 
         // Build one MeshCollider per map mesh, then index them into a spatial chunk grid.
         spdlog::info("Building {} map colliders...", map.get_meshes().size());
@@ -189,12 +192,12 @@ namespace rose::core
 
             // Precise 60 fps cap: sleep most of the budget, then spinwait the tail.
             static constexpr double k_target_frame_time = 1.0 / 60.0;
-            const double frame_end_target = current_time + k_target_frame_time;
-            const double sleep_until      = frame_end_target - 0.002; // leave 2 ms for spinwait
-            const double now              = glfwGetTime();
-            if (now < sleep_until)
-                std::this_thread::sleep_for(std::chrono::duration<double>(sleep_until - now));
-            while (glfwGetTime() < frame_end_target) {}
+            const double frame_target = current_time + k_target_frame_time;
+            const double sleep_s = frame_target - 0.002 - glfwGetTime(); // leave 2ms for spinwait
+            if (sleep_s > 0.0)
+                std::this_thread::sleep_for(std::chrono::duration<double>(sleep_s));
+            while (glfwGetTime() < frame_target)
+                ;
         }
     }
 } // namespace rose::core
