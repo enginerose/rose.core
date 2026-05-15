@@ -3,8 +3,7 @@
 //
 #pragma once
 #include "rose/core/collision_world.hpp"
-#include "rose/core/opengl/mesh.hpp"
-#include "rose/core/opengl/shader_program.hpp"
+#include "rose/core/vulkan/mesh.hpp"
 #include <omath/engines/opengl_engine/camera.hpp>
 #include <omath/engines/opengl_engine/mesh.hpp>
 #include <filesystem>
@@ -12,6 +11,11 @@
 
 namespace rose::core
 {
+    namespace vulkan
+    {
+        class Renderer;
+    }
+
     class Model final
     {
     public:
@@ -33,14 +37,13 @@ namespace rose::core
             return m_meshes.front().cpu_mesh().get_rotation_angles();
         }
 
-        [[nodiscard]] const std::vector<opengl::Mesh>& get_meshes() const { return m_meshes; }
+        [[nodiscard]] const std::vector<vulkan::Mesh>& get_meshes() const { return m_meshes; }
 
-        // Draw visible meshes. Caller must call shader.use() before this.
-        void draw(const opengl::ShaderProgram& shader,
+        void draw(vulkan::Renderer& renderer,
                   const omath::opengl_engine::Camera& camera) const;
 
     private:
-        std::vector<opengl::Mesh> m_meshes;
+        std::vector<vulkan::Mesh> m_meshes;
         std::vector<Aabb>         m_mesh_aabbs; // world-space AABB per mesh, parallel to m_meshes
 
         void load(const std::filesystem::path& path);

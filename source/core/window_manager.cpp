@@ -1,21 +1,30 @@
 //
 // Created by orange on 16.02.2026.
 //
+#ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
-#include <GL/glew.h>
+#endif
+
 #include "rose/core/window_manager.hpp"
-#include "rose/plugins/plugin_sdk.hpp"
 #include "rose/core/collision_world.hpp"
 #include "rose/core/model.hpp"
-#include "rose/core/opengl/screenshot.hpp"
-#include "rose/core/opengl/shader_program.hpp"
 #include "rose/core/player.hpp"
+#include "rose/core/vulkan/renderer.hpp"
+#include "rose/plugins/plugin_sdk.hpp"
+
+#include <GLFW/glfw3.h>
 #include <boost/dll.hpp>
+#include <imgui.h>
 #include <imgui_impl_glfw.h>
-#include <imgui_impl_opengl3.h>
+#include <imgui_impl_vulkan.h>
 #include <omath/engines/opengl_engine/camera.hpp>
 #include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 
 static void GlfwErrorCallback(int code, const char* desc)
 {
@@ -32,54 +41,61 @@ namespace rose::core
             spdlog::critical("Failed to initialize GLFW!");
             std::terminate();
         }
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+
+        if (glfwVulkanSupported() != GLFW_TRUE)
+        {
+            spdlog::critical("GLFW reports that Vulkan is not supported.");
+            std::terminate();
+        }
+
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         m_window = glfwCreateWindow(m_window_size.x, m_window_size.y, "ROSE", nullptr, nullptr);
-        if (!m_window)
+        if (m_window == nullptr)
         {
             spdlog::critical("Failed to create Window!");
             std::terminate();
         }
-        glfwMakeContextCurrent(m_window);
-        GLenum glewErr = glewInit();
-        if (glewErr != GLEW_OK)
-        {
-            spdlog::critical(
-                    "Failed to initialize GLEW, reason {}", reinterpret_cast<const char*>(glewGetErrorString(glewErr))
-            );
-            std::terminate();
-        }
 
-        timeBeginPeriod(1); // Set Windows timer resolution to 1ms
-        glfwSwapInterval(0);
+#ifdef _WIN32
+        timeBeginPeriod(1);
+#endif
+
         ImGui::CreateContext();
-        ImGui_ImplGlfw_InitForOpenGL(m_window, true);
-        ImGui_ImplOpenGL3_Init("#version 330");
-
+        m_renderer = std::make_unique<vulkan::Renderer>(m_window, m_window_size);
     }
 
-    void WindowManager::run() const
+    WindowManager::~WindowManager()
     {
-        const boost::dll::fs::path lib_path(
-            "rose.stream.dll"
-    ); // argv[1] contains path to directory with our plugin library
+        m_renderer.reset();
+        if (ImGui::GetCurrentContext() != nullptr)
+            ImGui::DestroyContext();
+
+        if (m_window != nullptr)
+        {
+            glfwDestroyWindow(m_window);
+            m_window = nullptr;
+        }
+        glfwTerminate();
+
+#ifdef _WIN32
+        timeEndPeriod(1);
+#endif
+    }
+
+    void WindowManager::run()
+    {
+        const boost::dll::fs::path lib_path("rose.stream.dll");
         using pluginapi_create_t = std::shared_ptr<StreamPluginApi>();
-        auto creator = boost::dll::import_alias<pluginapi_create_t>(        // type of imported symbol must be explicitly specified
-            lib_path,                                            // path to library
-            "create_plugin",                                                // symbol to import
-            boost::dll::load_mode::default_mode                              // do append extensions and prefixes
+        auto creator = boost::dll::import_alias<pluginapi_create_t>(
+            lib_path,
+            "create_plugin",
+            boost::dll::load_mode::default_mode
         );
         std::shared_ptr<StreamPluginApi> plugin = creator();
         plugin->run();
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-        glFrontFace(GL_CCW);
-        glClearColor(0.3f, 0.3f, 0.3f, 1.f);
 
         auto map = Model("map2.glb");
 
-        // Build one MeshCollider per map mesh, then index them into a spatial chunk grid.
         spdlog::info("Building {} map colliders...", map.get_meshes().size());
         std::vector<CollisionWorld::Collider> raw_colliders;
         raw_colliders.reserve(map.get_meshes().size());
@@ -91,16 +107,15 @@ namespace rose::core
 
         Player player{{0.f, 5.f, 0.f}};
 
+        auto framebuffer = m_renderer->framebuffer_size();
         omath::opengl_engine::Camera camera{
             player.get_eye_position(),
             player.get_view_angles(),
-            {static_cast<float>(m_window_size.x), static_cast<float>(m_window_size.y)},
+            {static_cast<float>(framebuffer.x), static_cast<float>(framebuffer.y)},
             omath::projection::FieldOfView::from_degrees(90.f),
             0.1f,
             10000.f
         };
-
-        auto shader_program = opengl::ShaderProgram::from_files("shaders/shader.vert", "shaders/shader.frag");
 
         bool   mouse_captured  = false;
         bool   esc_was_pressed = false;
@@ -109,31 +124,24 @@ namespace rose::core
         double last_mouse_y = 0.0;
         double last_time    = glfwGetTime();
 
-        while (true)
+        while (!glfwWindowShouldClose(m_window))
         {
             glfwPollEvents();
-
-            if (glfwWindowShouldClose(m_window))
-            {
-                glfwTerminate();
-                exit(EXIT_SUCCESS);
-            }
 
             const double current_time = glfwGetTime();
             const float delta_time = std::min(static_cast<float>(current_time - last_time), 0.05f);
             last_time = current_time;
 
-            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplVulkan_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
 
-            // Your other ImGui windows and widgets here...
-
-            // Example of how to display the FPS in a window
             ImGui::Begin("Performance");
-            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0 / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)",
+                        1000.0 / ImGui::GetIO().Framerate,
+                        ImGui::GetIO().Framerate);
             ImGui::End();
-            // --- ESC toggles mouse capture ---
+
             const bool esc_pressed = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
             if (esc_pressed && !esc_was_pressed)
             {
@@ -144,7 +152,6 @@ namespace rose::core
             }
             esc_was_pressed = esc_pressed;
 
-            // --- Collect input ---
             PlayerInput input;
             input.forward  = glfwGetKey(m_window, GLFW_KEY_W)     == GLFW_PRESS;
             input.backward = glfwGetKey(m_window, GLFW_KEY_S)     == GLFW_PRESS;
@@ -155,7 +162,8 @@ namespace rose::core
 
             if (mouse_captured)
             {
-                double mx, my;
+                double mx = 0.0;
+                double my = 0.0;
                 glfwGetCursorPos(m_window, &mx, &my);
                 if (!first_mouse)
                 {
@@ -169,35 +177,36 @@ namespace rose::core
                 last_mouse_x = mx;
                 last_mouse_y = my;
             }
+
             player.update(delta_time, world, input);
             camera.set_origin(player.get_eye_position());
             camera.set_view_angles(player.get_view_angles());
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            shader_program.use();
-            shader_program.set_mat4("uMVP", camera.get_view_projection_matrix().raw_array().data());
-            map.draw(shader_program, camera);
+
             ImGui::Render();
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-            int fb_w, fb_h;
-            glfwGetFramebufferSize(m_window, &fb_w, &fb_h);
-            glViewport(0, 0, fb_w, fb_h);
-            glfwSwapBuffers(m_window);
 
-            if (plugin->is_ready_to_stream())
+            if (m_renderer->begin_frame())
             {
-                auto bmp_data = rose::core::take_screenshot(fb_w, fb_h);
-                plugin->push_frame(bmp_data);
-            }
-            camera.set_view_port({static_cast<float>(fb_w), static_cast<float>(fb_h)});
+                map.draw(*m_renderer, camera);
+                m_renderer->render_imgui(ImGui::GetDrawData());
 
-            // Precise 60 fps cap: sleep most of the budget, then spinwait the tail.
+                const bool capture_frame = plugin->is_ready_to_stream();
+                auto bmp_data = m_renderer->end_frame(capture_frame);
+                if (capture_frame && !bmp_data.empty())
+                    plugin->push_frame(bmp_data);
+            }
+
+            framebuffer = m_renderer->framebuffer_size();
+            camera.set_view_port({static_cast<float>(framebuffer.x), static_cast<float>(framebuffer.y)});
+
             static constexpr double k_target_frame_time = 1.0 / 60.0;
             const double frame_target = current_time + k_target_frame_time;
-            const double sleep_s = frame_target - 0.002 - glfwGetTime(); // leave 2ms for spinwait
+            const double sleep_s = frame_target - 0.002 - glfwGetTime();
             if (sleep_s > 0.0)
                 std::this_thread::sleep_for(std::chrono::duration<double>(sleep_s));
             while (glfwGetTime() < frame_target)
                 ;
         }
+
+        m_renderer->wait_idle();
     }
 } // namespace rose::core

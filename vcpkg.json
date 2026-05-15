@@ -4,10 +4,9 @@
   "supports": "windows | linux",
   "dependencies": [
     "glfw3",
-    "glew",
     "tinygltf",
     "orange-math",
-    "opengl",
+    "vulkan",
     "spdlog",
     "boost-dll",
     "asio",
@@ -15,7 +14,7 @@
       "name": "imgui",
       "features": [
         "glfw-binding",
-        "opengl3-binding"
+        "vulkan-binding"
       ]
     }
   ]

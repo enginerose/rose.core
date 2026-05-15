@@ -8,6 +8,7 @@
 #include <tiny_gltf.h>
 
 #include "rose/core/model.hpp"
+#include "rose/core/vulkan/renderer.hpp"
 #include <omath/engines/opengl_engine/constants.hpp>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
@@ -149,22 +150,22 @@ namespace rose::core
     // Texture helper
     // ---------------------------------------------------------------------------
 
-    static std::shared_ptr<opengl::Texture> texture_from_image(const tinygltf::Image& image)
+    static std::shared_ptr<vulkan::Texture> texture_from_image(const tinygltf::Image& image)
     {
         if (image.image.empty() || image.width <= 0 || image.height <= 0)
             return nullptr;
-        return std::make_shared<opengl::Texture>(
+        return std::make_shared<vulkan::Texture>(
             image.width, image.height, image.component, image.image.data());
     }
 
     // ---------------------------------------------------------------------------
-    // Build one opengl::Mesh from a glTF primitive (no world transform baked in)
+    // Build one vulkan::Mesh from a glTF primitive (no world transform baked in)
     // ---------------------------------------------------------------------------
 
-    static opengl::Mesh build_mesh(
+    static vulkan::Mesh build_mesh(
         const tinygltf::Model&                               gltf,
         const tinygltf::Primitive&                           prim,
-        const std::vector<std::shared_ptr<opengl::Texture>>& gpu_textures)
+        const std::vector<std::shared_ptr<vulkan::Texture>>& textures)
     {
         auto pos_it = prim.attributes.find("POSITION");
 
@@ -247,7 +248,7 @@ namespace rose::core
         }
 
         // ---- Material / base-colour texture ----
-        std::vector<opengl::MeshTexture> mesh_textures;
+        std::vector<vulkan::MeshTexture> mesh_textures;
         if (prim.material >= 0)
         {
             const auto& mat = gltf.materials[prim.material];
@@ -255,13 +256,13 @@ namespace rose::core
             if (base_idx >= 0)
             {
                 const int source = gltf.textures[base_idx].source;
-                if (source >= 0 && gpu_textures[static_cast<size_t>(source)])
-                    mesh_textures.push_back({gpu_textures[static_cast<size_t>(source)],
-                                             opengl::TextureType::BaseColor});
+                if (source >= 0 && textures[static_cast<size_t>(source)])
+                    mesh_textures.push_back({textures[static_cast<size_t>(source)],
+                                             vulkan::TextureType::BaseColor});
             }
         }
 
-        return opengl::Mesh{
+        return vulkan::Mesh{
             omath::opengl_engine::Mesh{std::move(vertices), std::move(triangles)},
             std::move(mesh_textures)
         };
@@ -318,12 +319,12 @@ namespace rose::core
         return false;
     }
 
-    void Model::draw(const opengl::ShaderProgram& shader,
+    void Model::draw(vulkan::Renderer& renderer,
                      const omath::opengl_engine::Camera& camera) const
     {
         for (int i = 0; i < static_cast<int>(m_meshes.size()); ++i)
             if (!is_aabb_culled_by_frustum(camera, m_mesh_aabbs[i]))
-                m_meshes[i].draw(shader);
+                renderer.draw_mesh(m_meshes[i], camera);
     }
 
     void Model::load(const std::filesystem::path& path)
@@ -340,11 +341,11 @@ namespace rose::core
         if (!err.empty())  spdlog::error("Model ({}): {}", path.filename().string(), err);
         if (!ok)           throw std::runtime_error("Failed to load model: " + path.string());
 
-        // Pre-load GPU textures (shared across primitives)
-        std::vector<std::shared_ptr<opengl::Texture>> gpu_textures;
-        gpu_textures.reserve(gltf.images.size());
+        // Pre-load texture pixels (shared across primitives).
+        std::vector<std::shared_ptr<vulkan::Texture>> textures;
+        textures.reserve(gltf.images.size());
         for (const auto& image : gltf.images)
-            gpu_textures.push_back(texture_from_image(image));
+            textures.push_back(texture_from_image(image));
 
         // Collect per-mesh-index scale + translation from the scene graph
         std::map<int, NodeTransform> transforms;
@@ -361,7 +362,7 @@ namespace rose::core
             for (const auto& prim : gltf.meshes[mesh_idx].primitives)
             {
                 if (prim.mode != TINYGLTF_MODE_TRIANGLES) continue;
-                auto mesh = build_mesh(gltf, prim, gpu_textures);
+                auto mesh = build_mesh(gltf, prim, textures);
                 if (mesh.cpu_mesh().m_vertex_buffer.empty()) continue;
 
                 // Apply node transform via omath Mesh setters
