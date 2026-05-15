@@ -119,10 +119,22 @@ namespace rose::core
 
         bool   mouse_captured  = false;
         bool   esc_was_pressed = false;
+        bool   overlay_open = false;
+        bool   insert_was_pressed = false;
+        bool   restore_mouse_capture_after_overlay = false;
+        bool   fps_cap_enabled = true;
+        int    fps_limit = 60;
         bool   first_mouse  = true;
         double last_mouse_x = 0.0;
         double last_mouse_y = 0.0;
         double last_time    = glfwGetTime();
+
+        const auto set_mouse_captured = [&](const bool captured)
+        {
+            mouse_captured = captured;
+            glfwSetInputMode(m_window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+            first_mouse = true;
+        };
 
         while (!glfwWindowShouldClose(m_window))
         {
@@ -136,29 +148,66 @@ namespace rose::core
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
 
-            ImGui::Begin("Performance");
-            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)",
-                        1000.0 / ImGui::GetIO().Framerate,
-                        ImGui::GetIO().Framerate);
-            ImGui::End();
+            const bool insert_pressed = glfwGetKey(m_window, GLFW_KEY_INSERT) == GLFW_PRESS;
+            if (insert_pressed && !insert_was_pressed)
+            {
+                overlay_open = !overlay_open;
+                if (overlay_open)
+                {
+                    restore_mouse_capture_after_overlay = mouse_captured;
+                    set_mouse_captured(false);
+                }
+                else if (restore_mouse_capture_after_overlay)
+                {
+                    set_mouse_captured(true);
+                    restore_mouse_capture_after_overlay = false;
+                }
+            }
+            insert_was_pressed = insert_pressed;
+
+            if (overlay_open)
+            {
+                bool imgui_window_open = true;
+                ImGui::SetNextWindowPos({16.f, 16.f}, ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize({320.f, 0.f}, ImGuiCond_FirstUseEver);
+                ImGui::Begin("ROSE Overlay", &imgui_window_open, ImGuiWindowFlags_AlwaysAutoResize);
+                ImGui::Text("Application average %.3f ms/frame (%.1f FPS)",
+                            1000.0 / ImGui::GetIO().Framerate,
+                            ImGui::GetIO().Framerate);
+                ImGui::Separator();
+                ImGui::Checkbox("FPS cap", &fps_cap_enabled);
+                ImGui::BeginDisabled(!fps_cap_enabled);
+                ImGui::SliderInt("FPS limit", &fps_limit, 30, 360);
+                ImGui::EndDisabled();
+                ImGui::End();
+
+                if (!imgui_window_open)
+                    overlay_open = false;
+            }
+
+            if (!overlay_open && restore_mouse_capture_after_overlay)
+            {
+                set_mouse_captured(true);
+                restore_mouse_capture_after_overlay = false;
+            }
 
             const bool esc_pressed = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
-            if (esc_pressed && !esc_was_pressed)
+            if (!overlay_open && esc_pressed && !esc_was_pressed)
             {
-                mouse_captured = !mouse_captured;
-                glfwSetInputMode(m_window, GLFW_CURSOR,
-                                 mouse_captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
-                first_mouse = true;
+                set_mouse_captured(!mouse_captured);
             }
             esc_was_pressed = esc_pressed;
 
             PlayerInput input;
-            input.forward  = glfwGetKey(m_window, GLFW_KEY_W)     == GLFW_PRESS;
-            input.backward = glfwGetKey(m_window, GLFW_KEY_S)     == GLFW_PRESS;
-            input.right    = glfwGetKey(m_window, GLFW_KEY_D)     == GLFW_PRESS;
-            input.left     = glfwGetKey(m_window, GLFW_KEY_A)     == GLFW_PRESS;
-            input.jump     = glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS;
-            input.noclip   = glfwGetKey(m_window, GLFW_KEY_Q)     == GLFW_PRESS;
+            if (!overlay_open)
+            {
+                input.forward  = glfwGetKey(m_window, GLFW_KEY_W)     == GLFW_PRESS;
+                input.backward = glfwGetKey(m_window, GLFW_KEY_S)     == GLFW_PRESS;
+                input.right    = glfwGetKey(m_window, GLFW_KEY_D)     == GLFW_PRESS;
+                input.left     = glfwGetKey(m_window, GLFW_KEY_A)     == GLFW_PRESS;
+                input.jump     = glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS;
+                input.noclip   = glfwGetKey(m_window, GLFW_KEY_Q)     == GLFW_PRESS;
+            }
 
             if (mouse_captured)
             {
@@ -198,13 +247,16 @@ namespace rose::core
             framebuffer = m_renderer->framebuffer_size();
             camera.set_view_port({static_cast<float>(framebuffer.x), static_cast<float>(framebuffer.y)});
 
-            static constexpr double k_target_frame_time = 1.0 / 60.0;
-            const double frame_target = current_time + k_target_frame_time;
-            const double sleep_s = frame_target - 0.002 - glfwGetTime();
-            if (sleep_s > 0.0)
-                std::this_thread::sleep_for(std::chrono::duration<double>(sleep_s));
-            while (glfwGetTime() < frame_target)
-                ;
+            if (fps_cap_enabled)
+            {
+                fps_limit = std::clamp(fps_limit, 1, 1000);
+                const double frame_target = current_time + 1.0 / static_cast<double>(fps_limit);
+                const double sleep_s = frame_target - 0.002 - glfwGetTime();
+                if (sleep_s > 0.0)
+                    std::this_thread::sleep_for(std::chrono::duration<double>(sleep_s));
+                while (glfwGetTime() < frame_target)
+                    ;
+            }
         }
 
         m_renderer->wait_idle();
