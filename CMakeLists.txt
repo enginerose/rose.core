@@ -32,6 +32,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE include)
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     target_compile_options(${PROJECT_NAME} PRIVATE /W4 /WX)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/source/core/model.cpp" PROPERTIES COMPILE_OPTIONS /wd4702)
 elseif (OMATH_THREAT_WARNING_AS_ERROR)
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif ()

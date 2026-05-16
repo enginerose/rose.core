@@ -6,6 +6,17 @@ layout(location = 3) in vec4 vPrevClipPos;
 
 layout(set = 0, binding = 0) uniform sampler2D uBaseColor;
 
+layout(push_constant) uniform PushConstants {
+    mat4 uMVP;
+    mat4 uModel;
+    mat4 uPrevMVP;
+    vec3 uOutlineCenter;
+    float uOutlineWidth;
+    float uOutlineAlpha;
+    int uOutlineEnabled;
+    vec2 uOutlinePadding;
+} pc;
+
 layout(location = 0) out vec4 FragColor;
 layout(location = 1) out vec2 MotionVector;
 
@@ -14,6 +25,12 @@ const float kAmbient = 0.25;
 const float kDiffuse = 0.75;
 
 void main() {
+    if (pc.uOutlineEnabled != 0) {
+        FragColor = vec4(0.02, 0.72, 1.0, pc.uOutlineAlpha);
+        MotionVector = vec2(0.0);
+        return;
+    }
+
     vec3  n = normalize(vWorldNormal);
     float diffuse = max(dot(n, normalize(kSunDir)), 0.0) * kDiffuse;
     float lighting = kAmbient + diffuse;

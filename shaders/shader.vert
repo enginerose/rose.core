@@ -7,6 +7,11 @@ layout(push_constant) uniform PushConstants {
     mat4 uMVP;
     mat4 uModel;
     mat4 uPrevMVP;
+    vec3 uOutlineCenter;
+    float uOutlineWidth;
+    float uOutlineAlpha;
+    int uOutlineEnabled;
+    vec2 uOutlinePadding;
 } pc;
 
 layout(location = 0) out vec3 vWorldNormal;
@@ -21,11 +26,21 @@ vec4 toVulkanClip(vec4 clipPos) {
 }
 
 void main() {
-    vWorldNormal = mat3(transpose(inverse(pc.uModel))) * aNormal;
+    vWorldNormal = normalize(mat3(transpose(inverse(pc.uModel))) * aNormal);
     vUv = aUv;
 
-    vec4 clipPos = toVulkanClip(pc.uMVP * pc.uModel * vec4(aPos, 1.0));
-    vec4 prevClipPos = toVulkanClip(pc.uPrevMVP * pc.uModel * vec4(aPos, 1.0));
+    vec4 worldPos = pc.uModel * vec4(aPos, 1.0);
+    if (pc.uOutlineEnabled != 0) {
+        vec3 worldCenter = (pc.uModel * vec4(pc.uOutlineCenter, 1.0)).xyz;
+        vec3 expandDir = worldPos.xyz - worldCenter;
+        if (dot(expandDir, expandDir) < 0.000001) {
+            expandDir = vWorldNormal;
+        }
+        worldPos.xyz += normalize(expandDir) * pc.uOutlineWidth;
+    }
+
+    vec4 clipPos = toVulkanClip(pc.uMVP * worldPos);
+    vec4 prevClipPos = toVulkanClip(pc.uPrevMVP * worldPos);
     vClipPos = clipPos;
     vPrevClipPos = prevClipPos;
     gl_Position = clipPos;

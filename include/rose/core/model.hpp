@@ -6,7 +6,9 @@
 #include "rose/core/vulkan/mesh.hpp"
 #include <omath/engines/opengl_engine/camera.hpp>
 #include <omath/engines/opengl_engine/mesh.hpp>
+#include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 namespace rose::core
@@ -38,9 +40,12 @@ namespace rose::core
         }
 
         [[nodiscard]] const std::vector<vulkan::Mesh>& get_meshes() const { return m_meshes; }
+        [[nodiscard]] std::optional<std::size_t> pick_mesh(const omath::Vector2<float>& screen_position,
+                                                           const omath::opengl_engine::Camera& camera) const;
 
         void draw(vulkan::Renderer& renderer,
-                  const omath::opengl_engine::Camera& camera) const;
+                  const omath::opengl_engine::Camera& camera,
+                  std::optional<std::size_t> selected_mesh = std::nullopt) const;
 
     private:
         std::vector<vulkan::Mesh> m_meshes;

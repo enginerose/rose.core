@@ -9,11 +9,13 @@
 
 #include "rose/core/model.hpp"
 #include "rose/core/vulkan/renderer.hpp"
+#include <omath/collision/line_tracer.hpp>
 #include <omath/engines/opengl_engine/constants.hpp>
 #include <spdlog/spdlog.h>
-#include <stdexcept>
 #include <cmath>
+#include <limits>
 #include <map>
+#include <stdexcept>
 
 namespace rose::core
 {
@@ -319,12 +321,88 @@ namespace rose::core
         return false;
     }
 
-    void Model::draw(vulkan::Renderer& renderer,
-                     const omath::opengl_engine::Camera& camera) const
+    static std::optional<omath::Vector3<float>> trace_mesh(
+        const omath::collision::Ray<>& ray,
+        const omath::opengl_engine::Mesh& mesh) noexcept
     {
-        for (int i = 0; i < static_cast<int>(m_meshes.size()); ++i)
+        std::optional<omath::Vector3<float>> closest_hit;
+        float closest_distance = std::numeric_limits<float>::max();
+
+        for (const auto& triangle : mesh.m_element_buffer_object)
+        {
+            const omath::Triangle<omath::Vector3<float>> world_triangle{
+                mesh.vertex_position_to_world_space(mesh.m_vertex_buffer.at(triangle.x).position),
+                mesh.vertex_position_to_world_space(mesh.m_vertex_buffer.at(triangle.y).position),
+                mesh.vertex_position_to_world_space(mesh.m_vertex_buffer.at(triangle.z).position)
+            };
+
+            const auto hit = omath::collision::LineTracer<>::get_ray_hit_point(ray, world_triangle);
+            if (hit == ray.end)
+                continue;
+
+            const float distance = hit.distance_to(ray.start);
+            if (distance < closest_distance)
+            {
+                closest_distance = distance;
+                closest_hit = hit;
+            }
+        }
+
+        return closest_hit;
+    }
+
+    std::optional<std::size_t> Model::pick_mesh(const omath::Vector2<float>& screen_position,
+                                                const omath::opengl_engine::Camera& camera) const
+    {
+        const auto ray_end = camera.screen_to_world(screen_position);
+        if (!ray_end)
+            return std::nullopt;
+
+        const omath::collision::Ray<> ray{
+            camera.get_origin(),
+            *ray_end,
+            true
+        };
+
+        std::optional<std::size_t> picked_mesh;
+        float closest_distance = std::numeric_limits<float>::max();
+
+        for (std::size_t i = 0; i < m_meshes.size(); ++i)
+        {
+            const omath::primitives::Aabb<float> broadphase_box{
+                m_mesh_aabbs[i].min,
+                m_mesh_aabbs[i].max
+            };
+            const auto broadphase_hit = omath::collision::LineTracer<>::get_ray_hit_point(ray, broadphase_box);
+            if (broadphase_hit == ray.end)
+                continue;
+
+            const auto mesh_hit = trace_mesh(ray, m_meshes[i].cpu_mesh());
+            if (!mesh_hit)
+                continue;
+
+            const float distance = mesh_hit->distance_to(ray.start);
+            if (distance < closest_distance)
+            {
+                closest_distance = distance;
+                picked_mesh = i;
+            }
+        }
+
+        return picked_mesh;
+    }
+
+    void Model::draw(vulkan::Renderer& renderer,
+                     const omath::opengl_engine::Camera& camera,
+                     std::optional<std::size_t> selected_mesh) const
+    {
+        for (std::size_t i = 0; i < m_meshes.size(); ++i)
             if (!is_aabb_culled_by_frustum(camera, m_mesh_aabbs[i]))
                 renderer.draw_mesh(m_meshes[i], camera);
+
+        if (selected_mesh && *selected_mesh < m_meshes.size()
+            && !is_aabb_culled_by_frustum(camera, m_mesh_aabbs[*selected_mesh]))
+            renderer.draw_mesh_outline(m_meshes[*selected_mesh], camera);
     }
 
     void Model::load(const std::filesystem::path& path)

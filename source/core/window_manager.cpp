@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <iterator>
+#include <optional>
 #include <thread>
 
 static void GlfwErrorCallback(int code, const char* desc)
@@ -131,10 +132,12 @@ namespace rose::core
         bool   restore_mouse_capture_after_overlay = false;
         bool   fps_cap_enabled = true;
         int    fps_limit = 60;
+        std::optional<std::size_t> selected_mesh;
         bool   first_mouse  = true;
         double last_mouse_x = 0.0;
         double last_mouse_y = 0.0;
         double last_time    = glfwGetTime();
+        bool   left_mouse_was_pressed = false;
 
         const auto set_mouse_captured = [&](const bool captured)
         {
@@ -289,11 +292,38 @@ namespace rose::core
             camera.set_origin(player.get_eye_position());
             camera.set_view_angles(player.get_view_angles());
 
+            const bool left_mouse_pressed = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            if (!mouse_captured && left_mouse_pressed && !left_mouse_was_pressed && !ImGui::GetIO().WantCaptureMouse)
+            {
+                double cursor_x = 0.0;
+                double cursor_y = 0.0;
+                glfwGetCursorPos(m_window, &cursor_x, &cursor_y);
+
+                int window_width = 1;
+                int window_height = 1;
+                glfwGetWindowSize(m_window, &window_width, &window_height);
+
+                framebuffer = m_renderer->framebuffer_size();
+                camera.set_view_port({static_cast<float>(framebuffer.x), static_cast<float>(framebuffer.y)});
+
+                const float scale_x = window_width > 0
+                    ? static_cast<float>(framebuffer.x) / static_cast<float>(window_width)
+                    : 1.f;
+                const float scale_y = window_height > 0
+                    ? static_cast<float>(framebuffer.y) / static_cast<float>(window_height)
+                    : 1.f;
+
+                selected_mesh = map.pick_mesh(
+                    {static_cast<float>(cursor_x) * scale_x, static_cast<float>(cursor_y) * scale_y},
+                    camera);
+            }
+            left_mouse_was_pressed = left_mouse_pressed;
+
             ImGui::Render();
 
             if (m_renderer->begin_frame())
             {
-                map.draw(*m_renderer, camera);
+                map.draw(*m_renderer, camera, selected_mesh);
                 m_renderer->render_imgui(ImGui::GetDrawData());
 
                 const bool capture_frame = plugin->is_ready_to_stream();

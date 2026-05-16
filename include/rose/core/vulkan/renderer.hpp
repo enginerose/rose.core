@@ -36,6 +36,7 @@ namespace rose::core::vulkan
 
         [[nodiscard]] bool begin_frame();
         void draw_mesh(const Mesh& mesh, const omath::opengl_engine::Camera& camera);
+        void draw_mesh_outline(const Mesh& mesh, const omath::opengl_engine::Camera& camera);
         void render_imgui(ImDrawData* draw_data);
         [[nodiscard]] std::vector<std::byte> end_frame(bool capture_screenshot);
         void wait_idle() const;

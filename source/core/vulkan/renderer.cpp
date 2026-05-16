@@ -131,6 +131,7 @@ namespace rose::core::vulkan
             BufferResource index_buffer;
             uint32_t index_count = 0;
             VkDescriptorSet descriptor = VK_NULL_HANDLE;
+            omath::Vector3<float> local_center{};
         };
 
         struct FrameSync final
@@ -145,6 +146,11 @@ namespace rose::core::vulkan
             float view_projection[16]{};
             float model[16]{};
             float previous_view_projection[16]{};
+            float outline_center[3]{};
+            float outline_width = 0.0f;
+            float outline_alpha = 0.0f;
+            int32_t outline_enabled = 0;
+            float outline_padding[2]{};
         };
 
         [[nodiscard]] const char* dlss_quality_label(DlssQuality quality) noexcept
@@ -252,6 +258,7 @@ namespace rose::core::vulkan
         VkDescriptorSetLayout m_descriptor_set_layout = VK_NULL_HANDLE;
         VkPipelineLayout m_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline m_graphics_pipeline = VK_NULL_HANDLE;
+        VkPipeline m_outline_pipeline = VK_NULL_HANDLE;
         VkDescriptorPool m_descriptor_pool = VK_NULL_HANDLE;
 
         VkCommandPool m_command_pool = VK_NULL_HANDLE;
@@ -339,6 +346,8 @@ namespace rose::core::vulkan
 
             if (m_graphics_pipeline != VK_NULL_HANDLE)
                 vkDestroyPipeline(m_device, m_graphics_pipeline, nullptr);
+            if (m_outline_pipeline != VK_NULL_HANDLE)
+                vkDestroyPipeline(m_device, m_outline_pipeline, nullptr);
             if (m_pipeline_layout != VK_NULL_HANDLE)
                 vkDestroyPipelineLayout(m_device, m_pipeline_layout, nullptr);
             if (m_descriptor_set_layout != VK_NULL_HANDLE)
@@ -438,6 +447,23 @@ namespace rose::core::vulkan
 
         void draw_mesh(const Mesh& mesh, const omath::opengl_engine::Camera& camera)
         {
+            draw_mesh_with_pipeline(mesh, camera, m_graphics_pipeline, 0.0f, 0.0f, false);
+        }
+
+        void draw_mesh_outline(const Mesh& mesh, const omath::opengl_engine::Camera& camera)
+        {
+            draw_mesh_with_pipeline(mesh, camera, m_outline_pipeline, 0.18f, 0.12f, true);
+            draw_mesh_with_pipeline(mesh, camera, m_outline_pipeline, 0.11f, 0.26f, true);
+            draw_mesh_with_pipeline(mesh, camera, m_outline_pipeline, 0.055f, 0.85f, true);
+        }
+
+        void draw_mesh_with_pipeline(const Mesh& mesh,
+                                     const omath::opengl_engine::Camera& camera,
+                                     VkPipeline pipeline,
+                                     float outline_width,
+                                     float outline_alpha,
+                                     bool outline_enabled)
+        {
             if (!m_frame_started)
                 throw VulkanError("draw_mesh() called outside a frame");
             if (!m_scene_render_pass_active)
@@ -446,6 +472,8 @@ namespace rose::core::vulkan
             GpuMesh& gpu_mesh = ensure_mesh_resource(mesh);
             if (gpu_mesh.index_count == 0)
                 return;
+
+            vkCmdBindPipeline(m_active_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
             const VkBuffer vertex_buffers[] = {gpu_mesh.vertex_buffer.buffer};
             const VkDeviceSize offsets[] = {0};
@@ -474,9 +502,15 @@ namespace rose::core::vulkan
             const std::array<float, 16>& previous_vp =
                 m_previous_view_projection_valid ? m_previous_view_projection : m_frame_view_projection;
             std::memcpy(push.previous_view_projection, previous_vp.data(), sizeof(push.previous_view_projection));
+            push.outline_center[0] = gpu_mesh.local_center.x;
+            push.outline_center[1] = gpu_mesh.local_center.y;
+            push.outline_center[2] = gpu_mesh.local_center.z;
+            push.outline_width = outline_width;
+            push.outline_alpha = outline_alpha;
+            push.outline_enabled = outline_enabled ? 1 : 0;
             vkCmdPushConstants(m_active_command_buffer,
                                m_pipeline_layout,
-                               VK_SHADER_STAGE_VERTEX_BIT,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0,
                                sizeof(PushConstants),
                                &push);
@@ -1508,7 +1542,7 @@ namespace rose::core::vulkan
             dynamic_state.pDynamicStates = dynamic_states;
 
             VkPushConstantRange push_constant_range{};
-            push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+            push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
             push_constant_range.offset = 0;
             push_constant_range.size = sizeof(PushConstants);
 
@@ -1545,6 +1579,39 @@ namespace rose::core::vulkan
 
             check_vk(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_graphics_pipeline),
                      "Failed to create graphics pipeline");
+
+            VkPipelineRasterizationStateCreateInfo outline_rasterizer = rasterizer;
+            outline_rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT;
+
+            VkPipelineDepthStencilStateCreateInfo outline_depth_stencil = depth_stencil;
+            outline_depth_stencil.depthWriteEnable = VK_FALSE;
+            outline_depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+            VkPipelineColorBlendAttachmentState outline_color_blend_attachment = color_blend_attachment;
+            outline_color_blend_attachment.blendEnable = VK_TRUE;
+            outline_color_blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            outline_color_blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            outline_color_blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
+            outline_color_blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            outline_color_blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            outline_color_blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+            VkPipelineColorBlendAttachmentState outline_motion_blend_attachment = motion_blend_attachment;
+            outline_motion_blend_attachment.colorWriteMask = 0;
+            const std::array<VkPipelineColorBlendAttachmentState, 2> outline_color_blend_attachments{
+                outline_color_blend_attachment,
+                outline_motion_blend_attachment
+            };
+
+            VkPipelineColorBlendStateCreateInfo outline_color_blending = color_blending;
+            outline_color_blending.pAttachments = outline_color_blend_attachments.data();
+
+            pipeline_info.pRasterizationState = &outline_rasterizer;
+            pipeline_info.pDepthStencilState = &outline_depth_stencil;
+            pipeline_info.pColorBlendState = &outline_color_blending;
+
+            check_vk(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_outline_pipeline),
+                     "Failed to create outline pipeline");
 
             vkDestroyShaderModule(m_device, frag_shader_module, nullptr);
             vkDestroyShaderModule(m_device, vert_shader_module, nullptr);
@@ -2455,6 +2522,19 @@ namespace rose::core::vulkan
             gpu_mesh.index_count = static_cast<uint32_t>(triangles.size() * 3u);
             gpu_mesh.descriptor = descriptor_for_mesh_texture(mesh);
 
+            omath::Vector3<float> local_min = vertices.front().position;
+            omath::Vector3<float> local_max = vertices.front().position;
+            for (const auto& vertex : vertices)
+            {
+                local_min.x = std::min(local_min.x, vertex.position.x);
+                local_min.y = std::min(local_min.y, vertex.position.y);
+                local_min.z = std::min(local_min.z, vertex.position.z);
+                local_max.x = std::max(local_max.x, vertex.position.x);
+                local_max.y = std::max(local_max.y, vertex.position.y);
+                local_max.z = std::max(local_max.z, vertex.position.z);
+            }
+            gpu_mesh.local_center = (local_min + local_max) / 2.0f;
+
             auto [inserted_it, _] = m_mesh_resources.emplace(&mesh, gpu_mesh);
             return inserted_it->second;
         }
@@ -2665,6 +2745,11 @@ namespace rose::core::vulkan
     void Renderer::draw_mesh(const Mesh& mesh, const omath::opengl_engine::Camera& camera)
     {
         m_impl->draw_mesh(mesh, camera);
+    }
+
+    void Renderer::draw_mesh_outline(const Mesh& mesh, const omath::opengl_engine::Camera& camera)
+    {
+        m_impl->draw_mesh_outline(mesh, camera);
     }
 
     void Renderer::render_imgui(ImDrawData* draw_data)
