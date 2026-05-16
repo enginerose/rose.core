@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <iterator>
 #include <thread>
 
 static void GlfwErrorCallback(int code, const char* desc)
@@ -121,6 +122,12 @@ namespace rose::core
         bool   esc_was_pressed = false;
         bool   overlay_open = false;
         bool   insert_was_pressed = false;
+        bool   fullscreen = false;
+        bool   f11_was_pressed = false;
+        int    windowed_x = 0;
+        int    windowed_y = 0;
+        int    windowed_width = m_window_size.x;
+        int    windowed_height = m_window_size.y;
         bool   restore_mouse_capture_after_overlay = false;
         bool   fps_cap_enabled = true;
         int    fps_limit = 60;
@@ -133,6 +140,29 @@ namespace rose::core
         {
             mouse_captured = captured;
             glfwSetInputMode(m_window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+            first_mouse = true;
+        };
+
+        const auto toggle_fullscreen = [&]
+        {
+            if (!fullscreen)
+            {
+                glfwGetWindowPos(m_window, &windowed_x, &windowed_y);
+                glfwGetWindowSize(m_window, &windowed_width, &windowed_height);
+
+                GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+                const GLFWvidmode* mode = monitor != nullptr ? glfwGetVideoMode(monitor) : nullptr;
+                if (mode == nullptr)
+                    return;
+
+                glfwSetWindowMonitor(m_window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+                fullscreen = true;
+            }
+            else
+            {
+                glfwSetWindowMonitor(m_window, nullptr, windowed_x, windowed_y, windowed_width, windowed_height, 0);
+                fullscreen = false;
+            }
             first_mouse = true;
         };
 
@@ -165,6 +195,11 @@ namespace rose::core
             }
             insert_was_pressed = insert_pressed;
 
+            const bool f11_pressed = glfwGetKey(m_window, GLFW_KEY_F11) == GLFW_PRESS;
+            if (f11_pressed && !f11_was_pressed)
+                toggle_fullscreen();
+            f11_was_pressed = f11_pressed;
+
             if (overlay_open)
             {
                 bool imgui_window_open = true;
@@ -179,6 +214,29 @@ namespace rose::core
                 ImGui::BeginDisabled(!fps_cap_enabled);
                 ImGui::SliderInt("FPS limit", &fps_limit, 30, 360);
                 ImGui::EndDisabled();
+                ImGui::Separator();
+
+                bool dlss_enabled = m_renderer->dlss_enabled();
+                ImGui::BeginDisabled(!m_renderer->dlss_available());
+                if (ImGui::Checkbox("DLSS", &dlss_enabled))
+                    m_renderer->set_dlss_enabled(dlss_enabled);
+
+                constexpr const char* dlss_quality_labels[] = {
+                    "Quality",
+                    "Balanced",
+                    "Performance",
+                    "Ultra Performance",
+                    "Ultra Quality",
+                    "DLAA"
+                };
+                int dlss_quality = static_cast<int>(m_renderer->dlss_quality());
+                if (ImGui::Combo("DLSS mode",
+                                 &dlss_quality,
+                                 dlss_quality_labels,
+                                 static_cast<int>(std::size(dlss_quality_labels))))
+                    m_renderer->set_dlss_quality(static_cast<vulkan::DlssQuality>(dlss_quality));
+                ImGui::EndDisabled();
+                ImGui::TextWrapped("%s", m_renderer->dlss_status().c_str());
                 ImGui::End();
 
                 if (!imgui_window_open)

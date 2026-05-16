@@ -22,9 +22,10 @@
       "hidden": true,
       "inherits": "windows-base",
       "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "x64-windows-static",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md",
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_INSTALLED_DIR": "${sourceDir}/cmake-build/vcpkg_installed"
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/cmake-build/vcpkg_installed",
+        "ROSE_DYNAMIC_MSVC_RUNTIME": "ON"
       }
     },
     {

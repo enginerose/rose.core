@@ -7,15 +7,26 @@ file(GLOB_RECURSE ROSE_SOURCES source/*.cpp)
 
 add_executable(${PROJECT_NAME} ${ROSE_HEADERS} ${ROSE_SOURCES})
 
-set(OMATH_STATIC_MSVC_RUNTIME_LIBRARY ON)
+option(ROSE_DYNAMIC_MSVC_RUNTIME "Use the dynamic MSVC runtime library" OFF)
+if (ROSE_DYNAMIC_MSVC_RUNTIME)
+    set(ROSE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    set(OMATH_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+else ()
+    set(ROSE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set(OMATH_STATIC_MSVC_RUNTIME_LIBRARY ON CACHE BOOL "" FORCE)
+endif ()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
         CXX_STANDARD 23
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out/${CMAKE_BUILD_TYPE}"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out/${CMAKE_BUILD_TYPE}"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out/${CMAKE_BUILD_TYPE}"
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        MSVC_RUNTIME_LIBRARY "${ROSE_MSVC_RUNTIME_LIBRARY}"
 )
+
+if (MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "${ROSE_MSVC_RUNTIME_LIBRARY}" CACHE STRING "" FORCE)
+endif ()
 
 target_include_directories(${PROJECT_NAME} PRIVATE include)
 
@@ -36,6 +47,20 @@ find_package(Boost REQUIRED COMPONENTS dll)
 find_package(imgui CONFIG REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(asio CONFIG REQUIRED)
+
+set(ROSE_NGX_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extlibs/Streamline/external/ngx-sdk")
+set(ROSE_NGX_LIB_DIR "${ROSE_NGX_SDK_DIR}/lib/Windows_x86_64")
+set(ROSE_NGX_LIB_DEBUG "${ROSE_NGX_LIB_DIR}/nvsdk_ngx_d_dbg.lib")
+set(ROSE_NGX_LIB_RELEASE "${ROSE_NGX_LIB_DIR}/nvsdk_ngx_d.lib")
+set(ROSE_NGX_DLSS_DLL "" CACHE FILEPATH "Path to nvngx_dlss.dll. Leave empty to use Streamline bin/x64 or a local DLSS Swapper install.")
+if (WIN32 AND ROSE_DYNAMIC_MSVC_RUNTIME AND EXISTS "${ROSE_NGX_LIB_DEBUG}" AND EXISTS "${ROSE_NGX_LIB_RELEASE}")
+    option(ROSE_ENABLE_NGX_DLSS "Enable NVIDIA DLSS through the NGX SDK bundled with Streamline" ON)
+else ()
+    option(ROSE_ENABLE_NGX_DLSS "Enable NVIDIA DLSS through the NGX SDK bundled with Streamline" OFF)
+endif ()
+if (ROSE_ENABLE_NGX_DLSS AND NOT ROSE_DYNAMIC_MSVC_RUNTIME)
+    message(FATAL_ERROR "ROSE_ENABLE_NGX_DLSS requires ROSE_DYNAMIC_MSVC_RUNTIME=ON because NVIDIA's NGX libraries use /MD.")
+endif ()
 
 find_program(GLSLC_EXECUTABLE glslc HINTS "$ENV{VULKAN_SDK}/Bin")
 if (NOT GLSLC_EXECUTABLE)
@@ -71,3 +96,35 @@ add_subdirectory(extlibs/omath)
 target_link_libraries(${PROJECT_NAME} PRIVATE asio::asio imgui::imgui omath::omath glfw Vulkan::Vulkan spdlog::spdlog Boost::dll winmm)
 target_link_libraries(${PROJECT_NAME} PRIVATE)
 target_include_directories(${PROJECT_NAME} PRIVATE ${TINYGLTF_INCLUDE_DIRS})
+
+if (ROSE_ENABLE_NGX_DLSS)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ROSE_ENABLE_NGX_DLSS=1)
+    target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE "${ROSE_NGX_SDK_DIR}/include")
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+            debug "${ROSE_NGX_LIB_DEBUG}"
+            optimized "${ROSE_NGX_LIB_RELEASE}"
+    )
+
+    set(ROSE_NGX_DLSS_DLL_TO_COPY "${ROSE_NGX_DLSS_DLL}")
+    if (NOT ROSE_NGX_DLSS_DLL_TO_COPY AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extlibs/Streamline/bin/x64/nvngx_dlss.dll")
+        set(ROSE_NGX_DLSS_DLL_TO_COPY "${CMAKE_CURRENT_SOURCE_DIR}/extlibs/Streamline/bin/x64/nvngx_dlss.dll")
+    endif ()
+    if (NOT ROSE_NGX_DLSS_DLL_TO_COPY AND DEFINED ENV{LOCALAPPDATA})
+        file(GLOB_RECURSE ROSE_LOCAL_DLSS_DLLS "$ENV{LOCALAPPDATA}/DLSS Swapper/dlls/dlss/*/nvngx_dlss.dll")
+        if (ROSE_LOCAL_DLSS_DLLS)
+            list(GET ROSE_LOCAL_DLSS_DLLS 0 ROSE_NGX_DLSS_DLL_TO_COPY)
+        endif ()
+    endif ()
+
+    if (ROSE_NGX_DLSS_DLL_TO_COPY)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ROSE_NGX_DLSS_DLL_TO_COPY}"
+                "$<TARGET_FILE_DIR:${PROJECT_NAME}>/nvngx_dlss.dll"
+                VERBATIM
+        )
+        message(STATUS "DLSS runtime DLL: ${ROSE_NGX_DLSS_DLL_TO_COPY}")
+    else ()
+        message(WARNING "nvngx_dlss.dll was not found. DLSS can initialize NGX core, but DLSS feature creation will fail until the DLL is copied next to rose.core.exe or ROSE_NGX_DLSS_DLL is set.")
+    endif ()
+endif ()

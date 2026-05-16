@@ -6,6 +6,10 @@
 #include "stb_image_write.h"
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#ifdef ROSE_ENABLE_NGX_DLSS
+#include <nvsdk_ngx_helpers.h>
+#include <nvsdk_ngx_helpers_vk.h>
+#endif
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
@@ -109,6 +113,9 @@ namespace rose::core::vulkan
             VkImage image = VK_NULL_HANDLE;
             VkDeviceMemory memory = VK_NULL_HANDLE;
             VkImageView view = VK_NULL_HANDLE;
+            VkFormat format = VK_FORMAT_UNDEFINED;
+            VkExtent2D extent{};
+            VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
         };
 
         struct GpuTexture final
@@ -137,7 +144,75 @@ namespace rose::core::vulkan
         {
             float view_projection[16]{};
             float model[16]{};
+            float previous_view_projection[16]{};
         };
+
+        [[nodiscard]] const char* dlss_quality_label(DlssQuality quality) noexcept
+        {
+            switch (quality)
+            {
+            case DlssQuality::Quality:
+                return "Quality";
+            case DlssQuality::Balanced:
+                return "Balanced";
+            case DlssQuality::Performance:
+                return "Performance";
+            case DlssQuality::UltraPerformance:
+                return "Ultra Performance";
+            case DlssQuality::UltraQuality:
+                return "Ultra Quality";
+            case DlssQuality::Dlaa:
+                return "DLAA";
+            }
+            return "Unknown";
+        }
+
+#ifdef ROSE_ENABLE_NGX_DLSS
+        [[nodiscard]] NVSDK_NGX_PerfQuality_Value to_ngx_quality(DlssQuality quality) noexcept
+        {
+            switch (quality)
+            {
+            case DlssQuality::Quality:
+                return NVSDK_NGX_PerfQuality_Value_MaxQuality;
+            case DlssQuality::Balanced:
+                return NVSDK_NGX_PerfQuality_Value_Balanced;
+            case DlssQuality::Performance:
+                return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+            case DlssQuality::UltraPerformance:
+                return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+            case DlssQuality::UltraQuality:
+                return NVSDK_NGX_PerfQuality_Value_UltraQuality;
+            case DlssQuality::Dlaa:
+                return NVSDK_NGX_PerfQuality_Value_DLAA;
+            }
+            return NVSDK_NGX_PerfQuality_Value_MaxQuality;
+        }
+
+        [[nodiscard]] const char* ngx_result_name(NVSDK_NGX_Result result) noexcept
+        {
+            switch (result)
+            {
+            case NVSDK_NGX_Result_Success:
+                return "success";
+            case NVSDK_NGX_Result_FAIL_FeatureNotSupported:
+                return "feature not supported";
+            case NVSDK_NGX_Result_FAIL_PlatformError:
+                return "platform error";
+            case NVSDK_NGX_Result_FAIL_InvalidParameter:
+                return "invalid parameter";
+            case NVSDK_NGX_Result_FAIL_OutOfDate:
+                return "out of date";
+            case NVSDK_NGX_Result_FAIL_UnableToInitializeFeature:
+                return "unable to initialize feature";
+            case NVSDK_NGX_Result_FAIL_UnsupportedInputFormat:
+                return "unsupported input format";
+            case NVSDK_NGX_Result_FAIL_UnsupportedFormat:
+                return "unsupported format";
+            default:
+                return "failed";
+            }
+        }
+#endif
 
         [[nodiscard]] bool is_bgra_format(VkFormat format) noexcept
         {
@@ -170,8 +245,10 @@ namespace rose::core::vulkan
         VkExtent2D m_swapchain_extent{};
         uint32_t m_min_image_count = 2;
         bool m_swapchain_supports_transfer_src = false;
+        bool m_swapchain_supports_transfer_dst = false;
 
         VkRenderPass m_render_pass = VK_NULL_HANDLE;
+        VkRenderPass m_present_render_pass = VK_NULL_HANDLE;
         VkDescriptorSetLayout m_descriptor_set_layout = VK_NULL_HANDLE;
         VkPipelineLayout m_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline m_graphics_pipeline = VK_NULL_HANDLE;
@@ -180,8 +257,15 @@ namespace rose::core::vulkan
         VkCommandPool m_command_pool = VK_NULL_HANDLE;
         std::vector<VkCommandBuffer> m_command_buffers;
         std::vector<VkFramebuffer> m_framebuffers;
+        VkFramebuffer m_scene_framebuffer = VK_NULL_HANDLE;
+        ImageResource m_scene_color_image;
+        ImageResource m_motion_vector_image;
+        ImageResource m_dlss_output_image;
         ImageResource m_depth_image;
         VkFormat m_depth_format = VK_FORMAT_UNDEFINED;
+        VkFormat m_scene_color_format = VK_FORMAT_R8G8B8A8_UNORM;
+        VkFormat m_motion_vector_format = VK_FORMAT_R16G16_SFLOAT;
+        VkExtent2D m_scene_extent{};
 
         std::array<FrameSync, k_max_frames_in_flight> m_frames{};
         std::vector<VkFence> m_images_in_flight;
@@ -189,11 +273,35 @@ namespace rose::core::vulkan
         uint32_t m_active_image_index = 0;
         VkCommandBuffer m_active_command_buffer = VK_NULL_HANDLE;
         bool m_frame_started = false;
+        bool m_scene_render_pass_active = false;
+        bool m_present_render_pass_active = false;
 
         std::unordered_map<const Texture*, GpuTexture> m_texture_resources;
         std::unordered_map<const Mesh*, GpuMesh> m_mesh_resources;
         GpuTexture m_default_texture;
         bool m_default_texture_created = false;
+
+        std::array<float, 16> m_previous_view_projection{};
+        std::array<float, 16> m_frame_view_projection{};
+        bool m_previous_view_projection_valid = false;
+        bool m_frame_view_projection_set = false;
+
+        bool m_dlss_requested = false;
+        DlssQuality m_dlss_quality = DlssQuality::Quality;
+        std::string m_dlss_status = "DLSS is disabled";
+        float m_dlss_sharpness = 0.0f;
+        bool m_dlss_reset_next_frame = true;
+
+        std::vector<std::string> m_ngx_instance_extensions;
+        std::vector<std::string> m_ngx_device_extensions;
+        bool m_ngx_extensions_available = true;
+
+#ifdef ROSE_ENABLE_NGX_DLSS
+        bool m_ngx_initialized = false;
+        bool m_ngx_available = false;
+        NVSDK_NGX_Parameter* m_ngx_parameters = nullptr;
+        NVSDK_NGX_Handle* m_ngx_dlss_handle = nullptr;
+#endif
 
         Impl(GLFWwindow* window, const omath::Vector2<int>&)
             : m_window(window)
@@ -204,12 +312,13 @@ namespace rose::core::vulkan
             create_logical_device();
             create_command_pool();
             create_descriptor_pool();
+            init_dlss_sdk();
             create_swapchain();
             create_image_views();
             create_render_pass();
             create_descriptor_set_layout();
             create_graphics_pipeline();
-            create_depth_resources();
+            create_render_targets();
             create_framebuffers();
             create_command_buffers();
             create_sync_objects();
@@ -226,6 +335,7 @@ namespace rose::core::vulkan
 
             destroy_gpu_resources();
             cleanup_swapchain();
+            shutdown_dlss_sdk();
 
             if (m_graphics_pipeline != VK_NULL_HANDLE)
                 vkDestroyPipeline(m_device, m_graphics_pipeline, nullptr);
@@ -235,6 +345,8 @@ namespace rose::core::vulkan
                 vkDestroyDescriptorSetLayout(m_device, m_descriptor_set_layout, nullptr);
             if (m_render_pass != VK_NULL_HANDLE)
                 vkDestroyRenderPass(m_device, m_render_pass, nullptr);
+            if (m_present_render_pass != VK_NULL_HANDLE)
+                vkDestroyRenderPass(m_device, m_present_render_pass, nullptr);
 
             for (FrameSync& frame : m_frames)
             {
@@ -287,17 +399,18 @@ namespace rose::core::vulkan
             begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             check_vk(vkBeginCommandBuffer(m_active_command_buffer, &begin_info), "Failed to begin command buffer");
 
-            const std::array<VkClearValue, 2> clear_values{
+            const std::array<VkClearValue, 3> clear_values{
                 VkClearValue{.color = {{0.3f, 0.3f, 0.3f, 1.0f}}},
+                VkClearValue{.color = {{0.0f, 0.0f, 0.0f, 0.0f}}},
                 VkClearValue{.depthStencil = {1.0f, 0}},
             };
 
             VkRenderPassBeginInfo render_pass_info{};
             render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
             render_pass_info.renderPass = m_render_pass;
-            render_pass_info.framebuffer = m_framebuffers[m_active_image_index];
+            render_pass_info.framebuffer = m_scene_framebuffer;
             render_pass_info.renderArea.offset = {0, 0};
-            render_pass_info.renderArea.extent = m_swapchain_extent;
+            render_pass_info.renderArea.extent = m_scene_extent;
             render_pass_info.clearValueCount = static_cast<uint32_t>(clear_values.size());
             render_pass_info.pClearValues = clear_values.data();
 
@@ -307,16 +420,19 @@ namespace rose::core::vulkan
             VkViewport viewport{};
             viewport.x = 0.0f;
             viewport.y = 0.0f;
-            viewport.width = static_cast<float>(m_swapchain_extent.width);
-            viewport.height = static_cast<float>(m_swapchain_extent.height);
+            viewport.width = static_cast<float>(m_scene_extent.width);
+            viewport.height = static_cast<float>(m_scene_extent.height);
             viewport.minDepth = 0.0f;
             viewport.maxDepth = 1.0f;
             vkCmdSetViewport(m_active_command_buffer, 0, 1, &viewport);
 
-            const VkRect2D scissor{{0, 0}, m_swapchain_extent};
+            const VkRect2D scissor{{0, 0}, m_scene_extent};
             vkCmdSetScissor(m_active_command_buffer, 0, 1, &scissor);
 
             m_frame_started = true;
+            m_scene_render_pass_active = true;
+            m_present_render_pass_active = false;
+            m_frame_view_projection_set = false;
             return true;
         }
 
@@ -324,6 +440,8 @@ namespace rose::core::vulkan
         {
             if (!m_frame_started)
                 throw VulkanError("draw_mesh() called outside a frame");
+            if (!m_scene_render_pass_active)
+                throw VulkanError("draw_mesh() called after scene rendering finished");
 
             GpuMesh& gpu_mesh = ensure_mesh_resource(mesh);
             if (gpu_mesh.index_count == 0)
@@ -345,8 +463,17 @@ namespace rose::core::vulkan
             PushConstants push{};
             const auto vp = camera.get_view_projection_matrix().raw_array();
             const auto model = mesh.cpu_mesh().get_to_world_matrix().raw_array();
+            if (!m_frame_view_projection_set)
+            {
+                std::copy(vp.begin(), vp.end(), m_frame_view_projection.begin());
+                m_frame_view_projection_set = true;
+            }
+
             std::memcpy(push.view_projection, vp.data(), sizeof(push.view_projection));
             std::memcpy(push.model, model.data(), sizeof(push.model));
+            const std::array<float, 16>& previous_vp =
+                m_previous_view_projection_valid ? m_previous_view_projection : m_frame_view_projection;
+            std::memcpy(push.previous_view_projection, previous_vp.data(), sizeof(push.previous_view_projection));
             vkCmdPushConstants(m_active_command_buffer,
                                m_pipeline_layout,
                                VK_SHADER_STAGE_VERTEX_BIT,
@@ -361,6 +488,7 @@ namespace rose::core::vulkan
         {
             if (!m_frame_started)
                 throw VulkanError("render_imgui() called outside a frame");
+            finish_scene_rendering();
             ImGui_ImplVulkan_RenderDrawData(draw_data, m_active_command_buffer);
         }
 
@@ -382,7 +510,12 @@ namespace rose::core::vulkan
                               readback_buffer);
             }
 
-            vkCmdEndRenderPass(m_active_command_buffer);
+            finish_scene_rendering();
+            if (m_present_render_pass_active)
+            {
+                vkCmdEndRenderPass(m_active_command_buffer);
+                m_present_render_pass_active = false;
+            }
 
             if (can_capture)
                 record_screenshot_copy(readback_buffer);
@@ -390,7 +523,8 @@ namespace rose::core::vulkan
             check_vk(vkEndCommandBuffer(m_active_command_buffer), "Failed to end command buffer");
 
             FrameSync& frame = m_frames[m_current_frame];
-            const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT
+                                                  | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
             VkSubmitInfo submit_info{};
             submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -429,6 +563,12 @@ namespace rose::core::vulkan
             m_current_frame = (m_current_frame + 1u) % static_cast<std::size_t>(k_max_frames_in_flight);
             m_active_command_buffer = VK_NULL_HANDLE;
             m_frame_started = false;
+            if (m_frame_view_projection_set)
+            {
+                m_previous_view_projection = m_frame_view_projection;
+                m_previous_view_projection_valid = true;
+                m_frame_view_projection_set = false;
+            }
             return screenshot;
         }
 
@@ -443,6 +583,252 @@ namespace rose::core::vulkan
                 static_cast<int>(m_swapchain_extent.width),
                 static_cast<int>(m_swapchain_extent.height)
             };
+        }
+
+        [[nodiscard]] bool dlss_available() const
+        {
+#ifdef ROSE_ENABLE_NGX_DLSS
+            return m_ngx_available;
+#else
+            return false;
+#endif
+        }
+
+        [[nodiscard]] bool dlss_active() const
+        {
+#ifdef ROSE_ENABLE_NGX_DLSS
+            return m_dlss_requested
+                && m_ngx_available
+                && m_ngx_dlss_handle != nullptr;
+#else
+            return false;
+#endif
+        }
+
+        [[nodiscard]] VkExtent2D choose_scene_extent()
+        {
+            VkExtent2D extent = m_swapchain_extent;
+#ifdef ROSE_ENABLE_NGX_DLSS
+            release_dlss_feature();
+            if (!m_dlss_requested || !m_ngx_available || m_ngx_parameters == nullptr)
+                return extent;
+
+            unsigned int optimal_width = m_swapchain_extent.width;
+            unsigned int optimal_height = m_swapchain_extent.height;
+            unsigned int max_width = optimal_width;
+            unsigned int max_height = optimal_height;
+            unsigned int min_width = optimal_width;
+            unsigned int min_height = optimal_height;
+            float sharpness = 0.0f;
+            const NVSDK_NGX_Result settings_result = NGX_DLSS_GET_OPTIMAL_SETTINGS(m_ngx_parameters,
+                                                                                   m_swapchain_extent.width,
+                                                                                   m_swapchain_extent.height,
+                                                                                   to_ngx_quality(m_dlss_quality),
+                                                                                   &optimal_width,
+                                                                                   &optimal_height,
+                                                                                   &max_width,
+                                                                                   &max_height,
+                                                                                   &min_width,
+                                                                                   &min_height,
+                                                                                   &sharpness);
+            if (NVSDK_NGX_FAILED(settings_result) || optimal_width == 0 || optimal_height == 0)
+            {
+                m_dlss_status = std::string("DLSS settings query failed: ") + ngx_result_name(settings_result);
+                return extent;
+            }
+
+            extent.width = optimal_width;
+            extent.height = optimal_height;
+            m_dlss_sharpness = sharpness;
+            if (!create_dlss_feature(extent))
+                extent = m_swapchain_extent;
+#endif
+            return extent;
+        }
+
+        void init_dlss_sdk()
+        {
+#ifdef ROSE_ENABLE_NGX_DLSS
+            if (!m_ngx_extensions_available)
+                return;
+
+            std::error_code error;
+            const std::filesystem::path log_path = std::filesystem::current_path(error) / "ngx";
+            if (!error)
+                std::filesystem::create_directories(log_path, error);
+            const std::wstring log_path_w = log_path.wstring();
+
+            NVSDK_NGX_FeatureCommonInfo feature_info{};
+            feature_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+            const NVSDK_NGX_Result init_result =
+                NVSDK_NGX_VULKAN_Init_with_ProjectID("7b8f624d-44ea-4bc6-b656-4e72206d8d54",
+                                                     NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+                                                     "1.0.0",
+                                                     log_path_w.c_str(),
+                                                     m_instance,
+                                                     m_physical_device,
+                                                     m_device,
+                                                     vkGetInstanceProcAddr,
+                                                     vkGetDeviceProcAddr,
+                                                     &feature_info);
+            if (NVSDK_NGX_FAILED(init_result))
+            {
+                m_dlss_status = std::string("NGX init failed: ") + ngx_result_name(init_result);
+                return;
+            }
+            m_ngx_initialized = true;
+
+            const NVSDK_NGX_Result params_result = NVSDK_NGX_VULKAN_GetCapabilityParameters(&m_ngx_parameters);
+            if (NVSDK_NGX_FAILED(params_result) || m_ngx_parameters == nullptr)
+            {
+                m_dlss_status = std::string("NGX capability query failed: ") + ngx_result_name(params_result);
+                return;
+            }
+
+            int available = 0;
+            const NVSDK_NGX_Result available_result =
+                m_ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &available);
+            if (NVSDK_NGX_FAILED(available_result) || available == 0)
+            {
+                m_dlss_status = "DLSS is not available on this system";
+                return;
+            }
+
+            m_ngx_available = true;
+            m_dlss_status = "DLSS is available";
+#else
+            m_dlss_status = "DLSS support was not compiled";
+#endif
+        }
+
+        void release_dlss_feature()
+        {
+#ifdef ROSE_ENABLE_NGX_DLSS
+            if (m_ngx_dlss_handle != nullptr)
+            {
+                const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_ReleaseFeature(m_ngx_dlss_handle);
+                if (NVSDK_NGX_FAILED(result))
+                    spdlog::warn("Failed to release DLSS feature: {}", ngx_result_name(result));
+                m_ngx_dlss_handle = nullptr;
+            }
+#endif
+        }
+
+        [[nodiscard]] bool create_dlss_feature(VkExtent2D render_extent)
+        {
+#ifdef ROSE_ENABLE_NGX_DLSS
+            NVSDK_NGX_DLSS_Create_Params create_params{};
+            create_params.Feature.InWidth = render_extent.width;
+            create_params.Feature.InHeight = render_extent.height;
+            create_params.Feature.InTargetWidth = m_swapchain_extent.width;
+            create_params.Feature.InTargetHeight = m_swapchain_extent.height;
+            create_params.Feature.InPerfQualityValue = to_ngx_quality(m_dlss_quality);
+            create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes
+                                               | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
+            create_params.InEnableOutputSubrects = false;
+
+            VkCommandBuffer command_buffer = begin_single_time_commands();
+            const NVSDK_NGX_Result result = NGX_VULKAN_CREATE_DLSS_EXT1(m_device,
+                                                                        command_buffer,
+                                                                        1,
+                                                                        1,
+                                                                        &m_ngx_dlss_handle,
+                                                                        m_ngx_parameters,
+                                                                        &create_params);
+            end_single_time_commands(command_buffer);
+
+            if (NVSDK_NGX_FAILED(result) || m_ngx_dlss_handle == nullptr)
+            {
+                m_ngx_dlss_handle = nullptr;
+                m_dlss_status = std::string("DLSS feature creation failed: ") + ngx_result_name(result);
+                return false;
+            }
+
+            m_dlss_reset_next_frame = true;
+            m_dlss_status = std::string("DLSS ") + dlss_quality_label(m_dlss_quality)
+                          + " (" + std::to_string(render_extent.width) + "x" + std::to_string(render_extent.height)
+                          + " -> " + std::to_string(m_swapchain_extent.width) + "x" + std::to_string(m_swapchain_extent.height)
+                          + ")";
+            return true;
+#else
+            static_cast<void>(render_extent);
+            return false;
+#endif
+        }
+
+        void shutdown_dlss_sdk()
+        {
+#ifdef ROSE_ENABLE_NGX_DLSS
+            release_dlss_feature();
+            if (m_ngx_parameters != nullptr)
+            {
+                const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_DestroyParameters(m_ngx_parameters);
+                if (NVSDK_NGX_FAILED(result))
+                    spdlog::warn("Failed to destroy NGX parameters: {}", ngx_result_name(result));
+                m_ngx_parameters = nullptr;
+            }
+            if (m_ngx_initialized)
+            {
+                const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_Shutdown1(m_device);
+                if (NVSDK_NGX_FAILED(result))
+                    spdlog::warn("Failed to shut down NGX: {}", ngx_result_name(result));
+                m_ngx_initialized = false;
+            }
+            m_ngx_available = false;
+#endif
+        }
+
+        void destroy_frame_targets() noexcept
+        {
+            for (VkFramebuffer framebuffer : m_framebuffers)
+                vkDestroyFramebuffer(m_device, framebuffer, nullptr);
+            m_framebuffers.clear();
+
+            if (m_scene_framebuffer != VK_NULL_HANDLE)
+            {
+                vkDestroyFramebuffer(m_device, m_scene_framebuffer, nullptr);
+                m_scene_framebuffer = VK_NULL_HANDLE;
+            }
+
+            release_dlss_feature();
+            destroy_image(m_dlss_output_image);
+            destroy_image(m_motion_vector_image);
+            destroy_image(m_scene_color_image);
+            destroy_image(m_depth_image);
+        }
+
+        void recreate_frame_targets()
+        {
+            if (m_frame_started)
+                return;
+
+            check_vk(vkDeviceWaitIdle(m_device), "Failed to wait for device before recreating render targets");
+            destroy_frame_targets();
+            create_render_targets();
+            create_framebuffers();
+        }
+
+        void set_dlss_enabled(bool enabled)
+        {
+            if (m_dlss_requested == enabled)
+                return;
+
+            m_dlss_requested = enabled;
+            m_dlss_reset_next_frame = true;
+            if (!enabled)
+                m_dlss_status = "DLSS is disabled";
+            recreate_frame_targets();
+        }
+
+        void set_dlss_quality(DlssQuality quality)
+        {
+            if (m_dlss_quality == quality)
+                return;
+
+            m_dlss_quality = quality;
+            m_dlss_reset_next_frame = true;
+            if (m_dlss_requested)
+                recreate_frame_targets();
         }
 
         void create_instance()
@@ -460,11 +846,23 @@ namespace rose::core::vulkan
             if (glfw_extensions == nullptr || glfw_extension_count == 0)
                 throw VulkanError("GLFW did not report required Vulkan instance extensions");
 
+            load_ngx_required_extensions();
+            std::vector<std::string> extension_names;
+            extension_names.reserve(glfw_extension_count + m_ngx_instance_extensions.size());
+            for (uint32_t i = 0; i < glfw_extension_count; ++i)
+                extension_names.emplace_back(glfw_extensions[i]);
+            append_available_instance_extensions(extension_names);
+
+            std::vector<const char*> extension_ptrs;
+            extension_ptrs.reserve(extension_names.size());
+            for (const std::string& extension : extension_names)
+                extension_ptrs.push_back(extension.c_str());
+
             VkInstanceCreateInfo create_info{};
             create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
             create_info.pApplicationInfo = &app_info;
-            create_info.enabledExtensionCount = glfw_extension_count;
-            create_info.ppEnabledExtensionNames = glfw_extensions;
+            create_info.enabledExtensionCount = static_cast<uint32_t>(extension_ptrs.size());
+            create_info.ppEnabledExtensionNames = extension_ptrs.data();
             create_info.enabledLayerCount = 0;
 
             check_vk(vkCreateInstance(&create_info, nullptr, &m_instance), "Failed to create Vulkan instance");
@@ -473,6 +871,93 @@ namespace rose::core::vulkan
         void create_surface()
         {
             check_vk(glfwCreateWindowSurface(m_instance, m_window, nullptr, &m_surface), "Failed to create Vulkan surface");
+        }
+
+        void load_ngx_required_extensions()
+        {
+#ifdef ROSE_ENABLE_NGX_DLSS
+            unsigned int instance_count = 0;
+            unsigned int device_count = 0;
+            const char** instance_extensions = nullptr;
+            const char** device_extensions = nullptr;
+            const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_RequiredExtensions(
+                &instance_count, &instance_extensions, &device_count, &device_extensions);
+            if (NVSDK_NGX_FAILED(result))
+            {
+                m_ngx_extensions_available = false;
+                m_dlss_status = std::string("NGX extension query failed: ") + ngx_result_name(result);
+                return;
+            }
+
+            m_ngx_instance_extensions.clear();
+            m_ngx_device_extensions.clear();
+            for (unsigned int i = 0; i < instance_count; ++i)
+                m_ngx_instance_extensions.emplace_back(instance_extensions[i]);
+            for (unsigned int i = 0; i < device_count; ++i)
+                m_ngx_device_extensions.emplace_back(device_extensions[i]);
+#endif
+        }
+
+        [[nodiscard]] bool instance_extension_available(const char* name) const
+        {
+            uint32_t extension_count = 0;
+            check_vk(vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, nullptr),
+                     "Failed to enumerate Vulkan instance extension count");
+            std::vector<VkExtensionProperties> extensions(extension_count);
+            check_vk(vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, extensions.data()),
+                     "Failed to enumerate Vulkan instance extensions");
+
+            return std::any_of(extensions.begin(),
+                               extensions.end(),
+                               [name](const VkExtensionProperties& extension)
+                               {
+                                   return std::strcmp(extension.extensionName, name) == 0;
+                               });
+        }
+
+        void append_available_instance_extensions(std::vector<std::string>& extensions)
+        {
+            for (const std::string& extension : m_ngx_instance_extensions)
+            {
+                if (instance_extension_available(extension.c_str()))
+                    extensions.push_back(extension);
+                else
+                {
+                    m_ngx_extensions_available = false;
+                    m_dlss_status = "Missing Vulkan instance extension for DLSS: " + extension;
+                }
+            }
+        }
+
+        [[nodiscard]] bool device_extension_available(const char* name) const
+        {
+            uint32_t extension_count = 0;
+            check_vk(vkEnumerateDeviceExtensionProperties(m_physical_device, nullptr, &extension_count, nullptr),
+                     "Failed to enumerate Vulkan device extension count");
+            std::vector<VkExtensionProperties> extensions(extension_count);
+            check_vk(vkEnumerateDeviceExtensionProperties(m_physical_device, nullptr, &extension_count, extensions.data()),
+                     "Failed to enumerate Vulkan device extensions");
+
+            return std::any_of(extensions.begin(),
+                               extensions.end(),
+                               [name](const VkExtensionProperties& extension)
+                               {
+                                   return std::strcmp(extension.extensionName, name) == 0;
+                               });
+        }
+
+        void append_available_device_extensions(std::vector<std::string>& extensions)
+        {
+            for (const std::string& extension : m_ngx_device_extensions)
+            {
+                if (device_extension_available(extension.c_str()))
+                    extensions.push_back(extension);
+                else
+                {
+                    m_ngx_extensions_available = false;
+                    m_dlss_status = "Missing Vulkan device extension for DLSS: " + extension;
+                }
+            }
         }
 
         [[nodiscard]] QueueFamilies find_queue_families(VkPhysicalDevice device) const
@@ -610,7 +1095,12 @@ namespace rose::core::vulkan
                 queue_create_infos.push_back(queue_create_info);
             }
 
-            const char* device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+            std::vector<std::string> extension_names{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+            append_available_device_extensions(extension_names);
+            std::vector<const char*> extension_ptrs;
+            extension_ptrs.reserve(extension_names.size());
+            for (const std::string& extension : extension_names)
+                extension_ptrs.push_back(extension.c_str());
 
             VkPhysicalDeviceFeatures device_features{};
             VkDeviceCreateInfo create_info{};
@@ -618,8 +1108,8 @@ namespace rose::core::vulkan
             create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_create_infos.size());
             create_info.pQueueCreateInfos = queue_create_infos.data();
             create_info.pEnabledFeatures = &device_features;
-            create_info.enabledExtensionCount = 1;
-            create_info.ppEnabledExtensionNames = device_extensions;
+            create_info.enabledExtensionCount = static_cast<uint32_t>(extension_ptrs.size());
+            create_info.ppEnabledExtensionNames = extension_ptrs.data();
 
             check_vk(vkCreateDevice(m_physical_device, &create_info, nullptr, &m_device), "Failed to create Vulkan device");
             vkGetDeviceQueue(m_device, m_graphics_queue_family, 0, &m_graphics_queue);
@@ -693,8 +1183,13 @@ namespace rose::core::vulkan
             VkImageUsageFlags image_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
             m_swapchain_supports_transfer_src =
                 (support.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+            m_swapchain_supports_transfer_dst =
+                (support.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
             if (m_swapchain_supports_transfer_src)
                 image_usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            if (!m_swapchain_supports_transfer_dst)
+                throw VulkanError("Swapchain does not support transfer destination images required by the Vulkan renderer");
+            image_usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
             VkSwapchainCreateInfoKHR create_info{};
             create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -765,15 +1260,39 @@ namespace rose::core::vulkan
 
         void create_render_pass()
         {
+            const std::vector<VkFormat> color_format_candidates =
+                is_bgra_format(m_swapchain_image_format)
+                    ? std::vector<VkFormat>{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM}
+                    : std::vector<VkFormat>{VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM};
+            m_scene_color_format = find_supported_format(color_format_candidates,
+                                                         VK_IMAGE_TILING_OPTIMAL,
+                                                         VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+                                                             | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+                                                             | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+            m_motion_vector_format = find_supported_format({VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R32G32_SFLOAT},
+                                                           VK_IMAGE_TILING_OPTIMAL,
+                                                           VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+                                                               | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+
             VkAttachmentDescription color_attachment{};
-            color_attachment.format = m_swapchain_image_format;
+            color_attachment.format = m_scene_color_format;
             color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
             color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
             color_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            color_attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            color_attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+            VkAttachmentDescription motion_vector_attachment{};
+            motion_vector_attachment.format = m_motion_vector_format;
+            motion_vector_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+            motion_vector_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            motion_vector_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            motion_vector_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            motion_vector_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            motion_vector_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            motion_vector_attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
             m_depth_format = find_depth_format();
             VkAttachmentDescription depth_attachment{};
@@ -786,13 +1305,16 @@ namespace rose::core::vulkan
             depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-            const VkAttachmentReference color_attachment_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-            const VkAttachmentReference depth_attachment_ref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+            const std::array<VkAttachmentReference, 2> color_attachment_refs{{
+                {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+                {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+            }};
+            const VkAttachmentReference depth_attachment_ref{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
             VkSubpassDescription subpass{};
             subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-            subpass.colorAttachmentCount = 1;
-            subpass.pColorAttachments = &color_attachment_ref;
+            subpass.colorAttachmentCount = static_cast<uint32_t>(color_attachment_refs.size());
+            subpass.pColorAttachments = color_attachment_refs.data();
             subpass.pDepthStencilAttachment = &depth_attachment_ref;
 
             VkSubpassDependency dependency{};
@@ -806,7 +1328,11 @@ namespace rose::core::vulkan
             dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
                                      | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-            const std::array<VkAttachmentDescription, 2> attachments{color_attachment, depth_attachment};
+            const std::array<VkAttachmentDescription, 3> attachments{
+                color_attachment,
+                motion_vector_attachment,
+                depth_attachment
+            };
             VkRenderPassCreateInfo render_pass_info{};
             render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
             render_pass_info.attachmentCount = static_cast<uint32_t>(attachments.size());
@@ -817,6 +1343,43 @@ namespace rose::core::vulkan
             render_pass_info.pDependencies = &dependency;
 
             check_vk(vkCreateRenderPass(m_device, &render_pass_info, nullptr, &m_render_pass), "Failed to create render pass");
+
+            VkAttachmentDescription present_attachment{};
+            present_attachment.format = m_swapchain_image_format;
+            present_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+            present_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            present_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            present_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            present_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            present_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            present_attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+            const VkAttachmentReference present_attachment_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+
+            VkSubpassDescription present_subpass{};
+            present_subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            present_subpass.colorAttachmentCount = 1;
+            present_subpass.pColorAttachments = &present_attachment_ref;
+
+            VkSubpassDependency present_dependency{};
+            present_dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+            present_dependency.dstSubpass = 0;
+            present_dependency.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            present_dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            present_dependency.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            present_dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+            VkRenderPassCreateInfo present_render_pass_info{};
+            present_render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+            present_render_pass_info.attachmentCount = 1;
+            present_render_pass_info.pAttachments = &present_attachment;
+            present_render_pass_info.subpassCount = 1;
+            present_render_pass_info.pSubpasses = &present_subpass;
+            present_render_pass_info.dependencyCount = 1;
+            present_render_pass_info.pDependencies = &present_dependency;
+
+            check_vk(vkCreateRenderPass(m_device, &present_render_pass_info, nullptr, &m_present_render_pass),
+                     "Failed to create present render pass");
         }
 
         [[nodiscard]] VkShaderModule create_shader_module(const std::vector<char>& code) const
@@ -924,12 +1487,19 @@ namespace rose::core::vulkan
                                                   | VK_COLOR_COMPONENT_B_BIT
                                                   | VK_COLOR_COMPONENT_A_BIT;
             color_blend_attachment.blendEnable = VK_FALSE;
+            VkPipelineColorBlendAttachmentState motion_blend_attachment{};
+            motion_blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
+            motion_blend_attachment.blendEnable = VK_FALSE;
+            const std::array<VkPipelineColorBlendAttachmentState, 2> color_blend_attachments{
+                color_blend_attachment,
+                motion_blend_attachment
+            };
 
             VkPipelineColorBlendStateCreateInfo color_blending{};
             color_blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
             color_blending.logicOpEnable = VK_FALSE;
-            color_blending.attachmentCount = 1;
-            color_blending.pAttachments = &color_blend_attachment;
+            color_blending.attachmentCount = static_cast<uint32_t>(color_blend_attachments.size());
+            color_blending.pAttachments = color_blend_attachments.data();
 
             const VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
             VkPipelineDynamicStateCreateInfo dynamic_state{};
@@ -941,6 +1511,11 @@ namespace rose::core::vulkan
             push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
             push_constant_range.offset = 0;
             push_constant_range.size = sizeof(PushConstants);
+
+            VkPhysicalDeviceProperties device_properties{};
+            vkGetPhysicalDeviceProperties(m_physical_device, &device_properties);
+            if (device_properties.limits.maxPushConstantsSize < static_cast<uint32_t>(sizeof(PushConstants)))
+                throw VulkanError("Vulkan device does not support the push constant size required for motion vectors");
 
             VkPipelineLayoutCreateInfo pipeline_layout_info{};
             pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1000,30 +1575,93 @@ namespace rose::core::vulkan
                                          VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
         }
 
-        void create_depth_resources()
+        void create_render_targets()
         {
-            create_image(m_swapchain_extent.width,
-                         m_swapchain_extent.height,
+            m_scene_extent = choose_scene_extent();
+
+            create_image(m_scene_extent.width,
+                         m_scene_extent.height,
+                         m_scene_color_format,
+                         VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                             | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                             | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         m_scene_color_image);
+            m_scene_color_image.view = create_image_view(m_scene_color_image.image,
+                                                         m_scene_color_format,
+                                                         VK_IMAGE_ASPECT_COLOR_BIT);
+
+            create_image(m_scene_extent.width,
+                         m_scene_extent.height,
+                         m_motion_vector_format,
+                         VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                             | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         m_motion_vector_image);
+            m_motion_vector_image.view = create_image_view(m_motion_vector_image.image,
+                                                           m_motion_vector_format,
+                                                           VK_IMAGE_ASPECT_COLOR_BIT);
+
+            create_image(m_scene_extent.width,
+                         m_scene_extent.height,
                          m_depth_format,
                          VK_IMAGE_TILING_OPTIMAL,
-                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                             | VK_IMAGE_USAGE_SAMPLED_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                          m_depth_image);
             m_depth_image.view = create_image_view(m_depth_image.image, m_depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+            if (dlss_active())
+            {
+                create_image(m_swapchain_extent.width,
+                             m_swapchain_extent.height,
+                             m_scene_color_format,
+                             VK_IMAGE_TILING_OPTIMAL,
+                             VK_IMAGE_USAGE_STORAGE_BIT
+                                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                                 | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                                 | VK_IMAGE_USAGE_SAMPLED_BIT,
+                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                             m_dlss_output_image);
+                m_dlss_output_image.view = create_image_view(m_dlss_output_image.image,
+                                                             m_scene_color_format,
+                                                             VK_IMAGE_ASPECT_COLOR_BIT);
+            }
         }
 
         void create_framebuffers()
         {
+            const std::array<VkImageView, 3> scene_attachments{
+                m_scene_color_image.view,
+                m_motion_vector_image.view,
+                m_depth_image.view
+            };
+
+            VkFramebufferCreateInfo scene_framebuffer_info{};
+            scene_framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            scene_framebuffer_info.renderPass = m_render_pass;
+            scene_framebuffer_info.attachmentCount = static_cast<uint32_t>(scene_attachments.size());
+            scene_framebuffer_info.pAttachments = scene_attachments.data();
+            scene_framebuffer_info.width = m_scene_extent.width;
+            scene_framebuffer_info.height = m_scene_extent.height;
+            scene_framebuffer_info.layers = 1;
+
+            check_vk(vkCreateFramebuffer(m_device, &scene_framebuffer_info, nullptr, &m_scene_framebuffer),
+                     "Failed to create scene framebuffer");
+
             m_framebuffers.resize(m_swapchain_image_views.size());
             for (std::size_t i = 0; i < m_swapchain_image_views.size(); ++i)
             {
-                const std::array<VkImageView, 2> attachments{m_swapchain_image_views[i], m_depth_image.view};
+                const VkImageView attachment = m_swapchain_image_views[i];
 
                 VkFramebufferCreateInfo framebuffer_info{};
                 framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-                framebuffer_info.renderPass = m_render_pass;
-                framebuffer_info.attachmentCount = static_cast<uint32_t>(attachments.size());
-                framebuffer_info.pAttachments = attachments.data();
+                framebuffer_info.renderPass = m_present_render_pass;
+                framebuffer_info.attachmentCount = 1;
+                framebuffer_info.pAttachments = &attachment;
                 framebuffer_info.width = m_swapchain_extent.width;
                 framebuffer_info.height = m_swapchain_extent.height;
                 framebuffer_info.layers = 1;
@@ -1117,7 +1755,7 @@ namespace rose::core::vulkan
             init_info.QueueFamily = m_graphics_queue_family;
             init_info.Queue = m_graphics_queue;
             init_info.DescriptorPool = m_descriptor_pool;
-            init_info.RenderPass = m_render_pass;
+            init_info.RenderPass = m_present_render_pass;
             init_info.MinImageCount = m_min_image_count;
             init_info.ImageCount = static_cast<uint32_t>(m_swapchain_images.size());
             init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
@@ -1253,6 +1891,10 @@ namespace rose::core::vulkan
                           VkMemoryPropertyFlags properties,
                           ImageResource& image) const
         {
+            image.format = format;
+            image.extent = {width, height};
+            image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
             VkImageCreateInfo image_info{};
             image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
             image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -1346,6 +1988,279 @@ namespace rose::core::vulkan
                                  &barrier);
 
             end_single_time_commands(command_buffer);
+        }
+
+        void record_image_barrier(ImageResource& image,
+                                  VkImageAspectFlags aspect_mask,
+                                  VkImageLayout new_layout,
+                                  VkAccessFlags src_access,
+                                  VkAccessFlags dst_access,
+                                  VkPipelineStageFlags src_stage,
+                                  VkPipelineStageFlags dst_stage) const
+        {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = image.layout;
+            barrier.newLayout = new_layout;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image.image;
+            barrier.subresourceRange.aspectMask = aspect_mask;
+            barrier.subresourceRange.baseMipLevel = 0;
+            barrier.subresourceRange.levelCount = 1;
+            barrier.subresourceRange.baseArrayLayer = 0;
+            barrier.subresourceRange.layerCount = 1;
+            barrier.srcAccessMask = src_access;
+            barrier.dstAccessMask = dst_access;
+            if (image.layout == VK_IMAGE_LAYOUT_UNDEFINED)
+            {
+                barrier.srcAccessMask = 0;
+                src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            }
+
+            vkCmdPipelineBarrier(m_active_command_buffer,
+                                 src_stage,
+                                 dst_stage,
+                                 0,
+                                 0,
+                                 nullptr,
+                                 0,
+                                 nullptr,
+                                 1,
+                                 &barrier);
+            image.layout = new_layout;
+        }
+
+        void record_swapchain_barrier(VkImageLayout old_layout,
+                                      VkImageLayout new_layout,
+                                      VkAccessFlags src_access,
+                                      VkAccessFlags dst_access,
+                                      VkPipelineStageFlags src_stage,
+                                      VkPipelineStageFlags dst_stage) const
+        {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = old_layout;
+            barrier.newLayout = new_layout;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = m_swapchain_images[m_active_image_index];
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.baseMipLevel = 0;
+            barrier.subresourceRange.levelCount = 1;
+            barrier.subresourceRange.baseArrayLayer = 0;
+            barrier.subresourceRange.layerCount = 1;
+            barrier.srcAccessMask = src_access;
+            barrier.dstAccessMask = dst_access;
+
+            vkCmdPipelineBarrier(m_active_command_buffer,
+                                 src_stage,
+                                 dst_stage,
+                                 0,
+                                 0,
+                                 nullptr,
+                                 0,
+                                 nullptr,
+                                 1,
+                                 &barrier);
+        }
+
+        void blit_to_swapchain(ImageResource& source)
+        {
+            record_image_barrier(source,
+                                 VK_IMAGE_ASPECT_COLOR_BIT,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                 VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                 VK_ACCESS_TRANSFER_READ_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+            record_swapchain_barrier(VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     0,
+                                     VK_ACCESS_TRANSFER_WRITE_BIT,
+                                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+            VkImageBlit blit{};
+            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.srcSubresource.mipLevel = 0;
+            blit.srcSubresource.baseArrayLayer = 0;
+            blit.srcSubresource.layerCount = 1;
+            blit.srcOffsets[0] = {0, 0, 0};
+            blit.srcOffsets[1] = {
+                static_cast<int32_t>(source.extent.width),
+                static_cast<int32_t>(source.extent.height),
+                1
+            };
+            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.dstSubresource.mipLevel = 0;
+            blit.dstSubresource.baseArrayLayer = 0;
+            blit.dstSubresource.layerCount = 1;
+            blit.dstOffsets[0] = {0, 0, 0};
+            blit.dstOffsets[1] = {
+                static_cast<int32_t>(m_swapchain_extent.width),
+                static_cast<int32_t>(m_swapchain_extent.height),
+                1
+            };
+
+            vkCmdBlitImage(m_active_command_buffer,
+                           source.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           m_swapchain_images[m_active_image_index],
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1,
+                           &blit,
+                           VK_FILTER_LINEAR);
+
+            record_swapchain_barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                     VK_ACCESS_TRANSFER_WRITE_BIT,
+                                     VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        }
+
+        [[nodiscard]] bool evaluate_dlss()
+        {
+#ifdef ROSE_ENABLE_NGX_DLSS
+            if (!dlss_active())
+                return false;
+
+            record_image_barrier(m_scene_color_image,
+                                 VK_IMAGE_ASPECT_COLOR_BIT,
+                                 VK_IMAGE_LAYOUT_GENERAL,
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                 VK_ACCESS_SHADER_READ_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            record_image_barrier(m_motion_vector_image,
+                                 VK_IMAGE_ASPECT_COLOR_BIT,
+                                 VK_IMAGE_LAYOUT_GENERAL,
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                 VK_ACCESS_SHADER_READ_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            record_image_barrier(m_depth_image,
+                                 VK_IMAGE_ASPECT_DEPTH_BIT,
+                                 VK_IMAGE_LAYOUT_GENERAL,
+                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                 VK_ACCESS_SHADER_READ_BIT,
+                                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            record_image_barrier(m_dlss_output_image,
+                                 VK_IMAGE_ASPECT_COLOR_BIT,
+                                 VK_IMAGE_LAYOUT_GENERAL,
+                                 VK_ACCESS_TRANSFER_READ_BIT,
+                                 VK_ACCESS_SHADER_WRITE_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+            const VkImageSubresourceRange color_range{
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,
+                1,
+                0,
+                1
+            };
+            const VkImageSubresourceRange depth_range{
+                VK_IMAGE_ASPECT_DEPTH_BIT,
+                0,
+                1,
+                0,
+                1
+            };
+
+            NVSDK_NGX_Resource_VK color_resource = NVSDK_NGX_Create_ImageView_Resource_VK(m_scene_color_image.view,
+                                                                                          m_scene_color_image.image,
+                                                                                          color_range,
+                                                                                          m_scene_color_format,
+                                                                                          m_scene_extent.width,
+                                                                                          m_scene_extent.height,
+                                                                                          false);
+            NVSDK_NGX_Resource_VK motion_resource = NVSDK_NGX_Create_ImageView_Resource_VK(m_motion_vector_image.view,
+                                                                                           m_motion_vector_image.image,
+                                                                                           color_range,
+                                                                                           m_motion_vector_format,
+                                                                                           m_scene_extent.width,
+                                                                                           m_scene_extent.height,
+                                                                                           false);
+            NVSDK_NGX_Resource_VK depth_resource = NVSDK_NGX_Create_ImageView_Resource_VK(m_depth_image.view,
+                                                                                          m_depth_image.image,
+                                                                                          depth_range,
+                                                                                          m_depth_format,
+                                                                                          m_scene_extent.width,
+                                                                                          m_scene_extent.height,
+                                                                                          false);
+            NVSDK_NGX_Resource_VK output_resource = NVSDK_NGX_Create_ImageView_Resource_VK(m_dlss_output_image.view,
+                                                                                           m_dlss_output_image.image,
+                                                                                           color_range,
+                                                                                           m_scene_color_format,
+                                                                                           m_swapchain_extent.width,
+                                                                                           m_swapchain_extent.height,
+                                                                                           true);
+
+            NVSDK_NGX_VK_DLSS_Eval_Params eval_params{};
+            eval_params.Feature.pInColor = &color_resource;
+            eval_params.Feature.pInOutput = &output_resource;
+            eval_params.Feature.InSharpness = m_dlss_sharpness;
+            eval_params.pInDepth = &depth_resource;
+            eval_params.pInMotionVectors = &motion_resource;
+            eval_params.InRenderSubrectDimensions = {m_scene_extent.width, m_scene_extent.height};
+            eval_params.InReset = m_dlss_reset_next_frame ? 1 : 0;
+            eval_params.InMVScaleX = static_cast<float>(m_scene_extent.width);
+            eval_params.InMVScaleY = static_cast<float>(m_scene_extent.height);
+            eval_params.InPreExposure = 1.0f;
+            eval_params.InExposureScale = 1.0f;
+
+            const NVSDK_NGX_Result result = NGX_VULKAN_EVALUATE_DLSS_EXT(m_active_command_buffer,
+                                                                         m_ngx_dlss_handle,
+                                                                         m_ngx_parameters,
+                                                                         &eval_params);
+            if (NVSDK_NGX_FAILED(result))
+            {
+                m_dlss_status = std::string("DLSS evaluate failed: ") + ngx_result_name(result);
+                m_dlss_reset_next_frame = true;
+                return false;
+            }
+
+            m_dlss_reset_next_frame = false;
+            return true;
+#else
+            return false;
+#endif
+        }
+
+        void begin_present_render_pass()
+        {
+            VkRenderPassBeginInfo render_pass_info{};
+            render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            render_pass_info.renderPass = m_present_render_pass;
+            render_pass_info.framebuffer = m_framebuffers[m_active_image_index];
+            render_pass_info.renderArea.offset = {0, 0};
+            render_pass_info.renderArea.extent = m_swapchain_extent;
+            render_pass_info.clearValueCount = 0;
+            render_pass_info.pClearValues = nullptr;
+
+            vkCmdBeginRenderPass(m_active_command_buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+            m_present_render_pass_active = true;
+        }
+
+        void finish_scene_rendering()
+        {
+            if (!m_scene_render_pass_active)
+                return;
+
+            vkCmdEndRenderPass(m_active_command_buffer);
+            m_scene_render_pass_active = false;
+            m_scene_color_image.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            m_motion_vector_image.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            m_depth_image.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+            ImageResource* resolved_source = &m_scene_color_image;
+            if (evaluate_dlss())
+                resolved_source = &m_dlss_output_image;
+            blit_to_swapchain(*resolved_source);
+            begin_present_render_pass();
         }
 
         void copy_buffer_to_image(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) const
@@ -1698,11 +2613,7 @@ namespace rose::core::vulkan
                 m_command_buffers.clear();
             }
 
-            for (VkFramebuffer framebuffer : m_framebuffers)
-                vkDestroyFramebuffer(m_device, framebuffer, nullptr);
-            m_framebuffers.clear();
-
-            destroy_image(m_depth_image);
+            destroy_frame_targets();
 
             for (VkImageView image_view : m_swapchain_image_views)
                 vkDestroyImageView(m_device, image_view, nullptr);
@@ -1733,7 +2644,7 @@ namespace rose::core::vulkan
             if (m_render_pass != VK_NULL_HANDLE && old_format != m_swapchain_image_format)
                 throw VulkanError("Swapchain image format changed during resize; restart the application");
             create_image_views();
-            create_depth_resources();
+            create_render_targets();
             create_framebuffers();
             create_command_buffers();
             ImGui_ImplVulkan_SetMinImageCount(m_min_image_count);
@@ -1774,5 +2685,35 @@ namespace rose::core::vulkan
     omath::Vector2<int> Renderer::framebuffer_size() const
     {
         return m_impl->framebuffer_size();
+    }
+
+    bool Renderer::dlss_available() const
+    {
+        return m_impl->dlss_available();
+    }
+
+    bool Renderer::dlss_enabled() const
+    {
+        return m_impl->m_dlss_requested;
+    }
+
+    void Renderer::set_dlss_enabled(bool enabled)
+    {
+        m_impl->set_dlss_enabled(enabled);
+    }
+
+    DlssQuality Renderer::dlss_quality() const
+    {
+        return m_impl->m_dlss_quality;
+    }
+
+    void Renderer::set_dlss_quality(DlssQuality quality)
+    {
+        m_impl->set_dlss_quality(quality);
+    }
+
+    std::string Renderer::dlss_status() const
+    {
+        return m_impl->m_dlss_status;
     }
 } // namespace rose::core::vulkan

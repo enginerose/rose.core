@@ -7,6 +7,7 @@
 #include <memory>
 #include <omath/engines/opengl_engine/camera.hpp>
 #include <omath/linear_algebra/vector2.hpp>
+#include <string>
 #include <vector>
 
 struct GLFWwindow;
@@ -14,6 +15,16 @@ struct ImDrawData;
 
 namespace rose::core::vulkan
 {
+    enum class DlssQuality : int
+    {
+        Quality,
+        Balanced,
+        Performance,
+        UltraPerformance,
+        UltraQuality,
+        Dlaa
+    };
+
     class Renderer final
     {
     public:
@@ -30,6 +41,12 @@ namespace rose::core::vulkan
         void wait_idle() const;
 
         [[nodiscard]] omath::Vector2<int> framebuffer_size() const;
+        [[nodiscard]] bool dlss_available() const;
+        [[nodiscard]] bool dlss_enabled() const;
+        void set_dlss_enabled(bool enabled);
+        [[nodiscard]] DlssQuality dlss_quality() const;
+        void set_dlss_quality(DlssQuality quality);
+        [[nodiscard]] std::string dlss_status() const;
 
     private:
         struct Impl;

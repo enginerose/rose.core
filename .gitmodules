@@ -1,3 +1,6 @@
 [submodule "extlibs/omath"]
 	path = extlibs/omath
 	url = https://github.com/orange-cpp/omath
+[submodule "extlibs/Streamline"]
+	path = extlibs/Streamline
+	url = https://github.com/NVIDIA-RTX/Streamline.git
