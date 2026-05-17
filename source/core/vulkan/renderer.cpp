@@ -148,9 +148,10 @@ namespace rose::core::vulkan
             float previous_view_projection[16]{};
             float outline_center[3]{};
             float outline_width = 0.0f;
+            float outline_color[3]{};
             float outline_alpha = 0.0f;
             int32_t outline_enabled = 0;
-            float outline_padding[2]{};
+            float outline_padding[3]{};
         };
 
         [[nodiscard]] const char* dlss_quality_label(DlssQuality quality) noexcept
@@ -298,6 +299,7 @@ namespace rose::core::vulkan
         std::string m_dlss_status = "DLSS is disabled";
         float m_dlss_sharpness = 0.0f;
         bool m_dlss_reset_next_frame = true;
+        SelectionOutlineSettings m_selection_outline_settings{};
 
         std::vector<std::string> m_ngx_instance_extensions;
         std::vector<std::string> m_ngx_device_extensions;
@@ -447,19 +449,46 @@ namespace rose::core::vulkan
 
         void draw_mesh(const Mesh& mesh, const omath::opengl_engine::Camera& camera)
         {
-            draw_mesh_with_pipeline(mesh, camera, m_graphics_pipeline, 0.0f, 0.0f, false);
+            draw_mesh_with_pipeline(mesh, camera, m_graphics_pipeline, {}, 0.0f, 0.0f, false);
         }
 
         void draw_mesh_outline(const Mesh& mesh, const omath::opengl_engine::Camera& camera)
         {
-            draw_mesh_with_pipeline(mesh, camera, m_outline_pipeline, 0.18f, 0.12f, true);
-            draw_mesh_with_pipeline(mesh, camera, m_outline_pipeline, 0.11f, 0.26f, true);
-            draw_mesh_with_pipeline(mesh, camera, m_outline_pipeline, 0.055f, 0.85f, true);
+            const int pass_count = std::clamp(m_selection_outline_settings.smoothing_quality, 1, 64);
+            const float width = std::clamp(m_selection_outline_settings.width, 0.0f, 2.0f);
+
+            if (pass_count == 1)
+            {
+                draw_mesh_with_pipeline(mesh,
+                                        camera,
+                                        m_outline_pipeline,
+                                        m_selection_outline_settings.color,
+                                        width,
+                                        0.85f,
+                                        true);
+                return;
+            }
+
+            for (int pass = pass_count - 1; pass >= 0; --pass)
+            {
+                const float inner_t = static_cast<float>(pass_count - 1 - pass)
+                                    / static_cast<float>(pass_count - 1);
+                const float width_t = static_cast<float>(pass + 1) / static_cast<float>(pass_count);
+                const float alpha = 0.12f + (0.85f - 0.12f) * inner_t * inner_t;
+                draw_mesh_with_pipeline(mesh,
+                                        camera,
+                                        m_outline_pipeline,
+                                        m_selection_outline_settings.color,
+                                        width * width_t,
+                                        alpha,
+                                        true);
+            }
         }
 
         void draw_mesh_with_pipeline(const Mesh& mesh,
                                      const omath::opengl_engine::Camera& camera,
                                      VkPipeline pipeline,
+                                     const std::array<float, 3>& outline_color,
                                      float outline_width,
                                      float outline_alpha,
                                      bool outline_enabled)
@@ -506,6 +535,9 @@ namespace rose::core::vulkan
             push.outline_center[1] = gpu_mesh.local_center.y;
             push.outline_center[2] = gpu_mesh.local_center.z;
             push.outline_width = outline_width;
+            push.outline_color[0] = outline_color[0];
+            push.outline_color[1] = outline_color[1];
+            push.outline_color[2] = outline_color[2];
             push.outline_alpha = outline_alpha;
             push.outline_enabled = outline_enabled ? 1 : 0;
             vkCmdPushConstants(m_active_command_buffer,
@@ -863,6 +895,16 @@ namespace rose::core::vulkan
             m_dlss_reset_next_frame = true;
             if (m_dlss_requested)
                 recreate_frame_targets();
+        }
+
+        void set_selection_outline_settings(const SelectionOutlineSettings& settings)
+        {
+            m_selection_outline_settings = settings;
+            for (float& channel : m_selection_outline_settings.color)
+                channel = std::clamp(channel, 0.0f, 1.0f);
+            m_selection_outline_settings.width = std::clamp(m_selection_outline_settings.width, 0.0f, 2.0f);
+            m_selection_outline_settings.smoothing_quality =
+                std::clamp(m_selection_outline_settings.smoothing_quality, 1, 64);
         }
 
         void create_instance()
@@ -2800,5 +2842,15 @@ namespace rose::core::vulkan
     std::string Renderer::dlss_status() const
     {
         return m_impl->m_dlss_status;
+    }
+
+    SelectionOutlineSettings Renderer::selection_outline_settings() const
+    {
+        return m_impl->m_selection_outline_settings;
+    }
+
+    void Renderer::set_selection_outline_settings(const SelectionOutlineSettings& settings)
+    {
+        m_impl->set_selection_outline_settings(settings);
     }
 } // namespace rose::core::vulkan

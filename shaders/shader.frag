@@ -12,9 +12,10 @@ layout(push_constant) uniform PushConstants {
     mat4 uPrevMVP;
     vec3 uOutlineCenter;
     float uOutlineWidth;
+    vec3 uOutlineColor;
     float uOutlineAlpha;
     int uOutlineEnabled;
-    vec2 uOutlinePadding;
+    vec3 uOutlinePadding;
 } pc;
 
 layout(location = 0) out vec4 FragColor;
@@ -26,7 +27,7 @@ const float kDiffuse = 0.75;
 
 void main() {
     if (pc.uOutlineEnabled != 0) {
-        FragColor = vec4(0.02, 0.72, 1.0, pc.uOutlineAlpha);
+        FragColor = vec4(pc.uOutlineColor, pc.uOutlineAlpha);
         MotionVector = vec2(0.0);
         return;
     }

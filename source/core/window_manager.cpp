@@ -303,6 +303,23 @@ namespace rose::core
                     ImGui::SliderFloat("Move snap", &gizmo_translate_snap, 0.01f, 10.0f, "%.2f m");
                 ImGui::EndDisabled();
                 ImGui::EndDisabled();
+
+                ImGui::Separator();
+                auto outline_settings = m_renderer->selection_outline_settings();
+                bool outline_settings_changed = false;
+                outline_settings_changed |= ImGui::ColorEdit3("Glow color", outline_settings.color.data());
+                outline_settings_changed |= ImGui::SliderFloat("Outline width",
+                                                               &outline_settings.width,
+                                                               0.01f,
+                                                               0.5f,
+                                                               "%.3f");
+                outline_settings_changed |= ImGui::SliderInt("Smoothing quality",
+                                                             &outline_settings.smoothing_quality,
+                                                             1,
+                                                             64);
+                if (outline_settings_changed)
+                    m_renderer->set_selection_outline_settings(outline_settings);
+
                 ImGui::End();
 
                 if (!imgui_window_open)

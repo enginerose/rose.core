@@ -9,9 +9,10 @@ layout(push_constant) uniform PushConstants {
     mat4 uPrevMVP;
     vec3 uOutlineCenter;
     float uOutlineWidth;
+    vec3 uOutlineColor;
     float uOutlineAlpha;
     int uOutlineEnabled;
-    vec2 uOutlinePadding;
+    vec3 uOutlinePadding;
 } pc;
 
 layout(location = 0) out vec3 vWorldNormal;

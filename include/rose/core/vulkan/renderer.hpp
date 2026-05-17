@@ -3,6 +3,7 @@
 //
 #pragma once
 #include "rose/core/vulkan/mesh.hpp"
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <omath/engines/opengl_engine/camera.hpp>
@@ -23,6 +24,13 @@ namespace rose::core::vulkan
         UltraPerformance,
         UltraQuality,
         Dlaa
+    };
+
+    struct SelectionOutlineSettings final
+    {
+        std::array<float, 3> color{0.02f, 0.72f, 1.0f};
+        float width = 0.18f;
+        int smoothing_quality = 3;
     };
 
     class Renderer final
@@ -48,6 +56,8 @@ namespace rose::core::vulkan
         [[nodiscard]] DlssQuality dlss_quality() const;
         void set_dlss_quality(DlssQuality quality);
         [[nodiscard]] std::string dlss_status() const;
+        [[nodiscard]] SelectionOutlineSettings selection_outline_settings() const;
+        void set_selection_outline_settings(const SelectionOutlineSettings& settings);
 
     private:
         struct Impl;
