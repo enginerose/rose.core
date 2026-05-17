@@ -145,6 +145,7 @@ namespace rose::core
         double last_mouse_y = 0.0;
         double last_time    = glfwGetTime();
         bool   left_mouse_was_pressed = false;
+        bool   middle_mouse_was_pressed = false;
 
         const auto set_mouse_captured = [&](const bool captured)
         {
@@ -314,6 +315,20 @@ namespace rose::core
                 restore_mouse_capture_after_overlay = false;
             }
 
+            const bool middle_mouse_pressed = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
+            if (!mouse_captured
+                && selected_mesh
+                && middle_mouse_pressed
+                && !middle_mouse_was_pressed
+                && !overlay_window_hovered
+                && !ImGuizmo::IsUsing())
+            {
+                gizmo_operation = gizmo_operation == ImGuizmo::TRANSLATE
+                    ? ImGuizmo::ROTATE
+                    : ImGuizmo::TRANSLATE;
+            }
+            middle_mouse_was_pressed = middle_mouse_pressed;
+
             const bool esc_pressed = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
             if (!overlay_open && esc_pressed && !esc_was_pressed)
             {
@@ -390,7 +405,9 @@ namespace rose::core
                                              gizmo_snap_enabled ? snap_values.data() : nullptr))
                     {
                         if (gizmo_operation == ImGuizmo::TRANSLATE)
-                            map.set_mesh_origin(*selected_mesh, {matrix[12], matrix[13], matrix[14]});
+                        {
+                            map.set_mesh_origin(*selected_mesh, omath::mat_extract_origin(omath::opengl_engine::Mat4X4(matrix.data())));
+                        }
                         else
                             map.set_mesh_matrix(*selected_mesh, omath::opengl_engine::Mat4X4(matrix.data()));
                     }

@@ -352,49 +352,6 @@ namespace rose::core
         return closest_hit;
     }
 
-    [[nodiscard]] static omath::Vector3<float> matrix_column_scale(
-        const omath::opengl_engine::Mat4X4& matrix,
-        const std::size_t column) noexcept
-    {
-        return {
-            matrix.at(0, column),
-            matrix.at(1, column),
-            matrix.at(2, column)
-        };
-    }
-
-    [[nodiscard]] static float safe_axis_scale(const float scale) noexcept
-    {
-        constexpr float epsilon = 0.000001f;
-        return std::abs(scale) > epsilon ? scale : 1.0f;
-    }
-
-    [[nodiscard]] static omath::opengl_engine::ViewAngles matrix_to_view_angles(
-        const omath::opengl_engine::Mat4X4& matrix,
-        const omath::Vector3<float>& scale) noexcept
-    {
-        using ViewAngles = omath::opengl_engine::ViewAngles;
-
-        const float sx = safe_axis_scale(scale.x);
-        const float sy = safe_axis_scale(scale.y);
-        const float sz = safe_axis_scale(scale.z);
-
-        const float r00 = matrix.at(0, 0) / sx;
-        const float r10 = matrix.at(1, 0) / sx;
-        const float r20 = matrix.at(2, 0) / sx;
-        const float r21 = matrix.at(2, 1) / sy;
-        const float r22 = matrix.at(2, 2) / sz;
-
-        const float pitch_rad = std::atan2(r21, r22);
-        const float yaw_rad = std::asin(std::clamp(-r20, -1.0f, 1.0f));
-        const float roll_rad = std::atan2(r10, r00);
-
-        return {
-            decltype(ViewAngles{}.pitch)::from_radians(pitch_rad),
-            decltype(ViewAngles{}.yaw)::from_radians(yaw_rad),
-            decltype(ViewAngles{}.roll)::from_radians(roll_rad),
-        };
-    }
 
     std::optional<omath::opengl_engine::Mat4X4> Model::mesh_matrix(const std::size_t mesh_index) const
     {
@@ -419,19 +376,11 @@ namespace rose::core
         if (mesh_index >= m_meshes.size())
             return;
 
-        const omath::Vector3<float> x_axis = matrix_column_scale(matrix, 0);
-        const omath::Vector3<float> y_axis = matrix_column_scale(matrix, 1);
-        const omath::Vector3<float> z_axis = matrix_column_scale(matrix, 2);
-        const omath::Vector3<float> scale{
-            x_axis.length(),
-            y_axis.length(),
-            z_axis.length()
-        };
 
         auto& mesh = m_meshes[mesh_index].cpu_mesh();
-        mesh.set_origin({matrix.at(0, 3), matrix.at(1, 3), matrix.at(2, 3)});
-        mesh.set_scale(scale);
-        mesh.set_rotation(matrix_to_view_angles(matrix, scale));
+        mesh.set_origin(omath::mat_extract_origin(matrix));
+        mesh.set_scale(omath::mat_extract_scale(matrix));
+        mesh.set_rotation(omath::opengl_engine::extract_rotation_angles(matrix));
         m_mesh_aabbs[mesh_index] = Aabb::from_mesh(mesh);
     }
 
