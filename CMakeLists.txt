@@ -49,6 +49,17 @@ find_package(imgui CONFIG REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(asio CONFIG REQUIRED)
 
+add_library(imguizmo STATIC extlibs/ImGuizmo/ImGuizmo.cpp)
+target_include_directories(imguizmo PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/extlibs/ImGuizmo")
+target_link_libraries(imguizmo PUBLIC imgui::imgui)
+set_target_properties(imguizmo PROPERTIES
+        CXX_STANDARD 23
+        MSVC_RUNTIME_LIBRARY "${ROSE_MSVC_RUNTIME_LIBRARY}"
+)
+if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(imguizmo PRIVATE /W0)
+endif ()
+
 set(ROSE_NGX_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extlibs/Streamline/external/ngx-sdk")
 set(ROSE_NGX_LIB_DIR "${ROSE_NGX_SDK_DIR}/lib/Windows_x86_64")
 set(ROSE_NGX_LIB_DEBUG "${ROSE_NGX_LIB_DIR}/nvsdk_ngx_d_dbg.lib")
@@ -94,7 +105,7 @@ add_dependencies(${PROJECT_NAME} rose_shaders)
 target_compile_definitions(${PROJECT_NAME} PRIVATE ROSE_SHADER_DIR="${ROSE_SHADER_OUTPUT_DIR}")
 
 add_subdirectory(extlibs/omath)
-target_link_libraries(${PROJECT_NAME} PRIVATE asio::asio imgui::imgui omath::omath glfw Vulkan::Vulkan spdlog::spdlog Boost::dll winmm)
+target_link_libraries(${PROJECT_NAME} PRIVATE asio::asio imgui::imgui imguizmo omath::omath glfw Vulkan::Vulkan spdlog::spdlog Boost::dll winmm)
 target_link_libraries(${PROJECT_NAME} PRIVATE)
 target_include_directories(${PROJECT_NAME} PRIVATE ${TINYGLTF_INCLUDE_DIRS})
 

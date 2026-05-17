@@ -16,12 +16,14 @@
 #include <GLFW/glfw3.h>
 #include <boost/dll.hpp>
 #include <imgui.h>
+#include <ImGuizmo.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
 #include <omath/engines/opengl_engine/camera.hpp>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <iterator>
@@ -133,6 +135,11 @@ namespace rose::core
         bool   fps_cap_enabled = true;
         int    fps_limit = 60;
         std::optional<std::size_t> selected_mesh;
+        ImGuizmo::OPERATION gizmo_operation = ImGuizmo::TRANSLATE;
+        ImGuizmo::MODE      gizmo_mode = ImGuizmo::WORLD;
+        bool   gizmo_snap_enabled = false;
+        float  gizmo_translate_snap = 0.5f;
+        float  gizmo_rotate_snap = 15.0f;
         bool   first_mouse  = true;
         double last_mouse_x = 0.0;
         double last_mouse_y = 0.0;
@@ -180,6 +187,33 @@ namespace rose::core
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
+            ImGuizmo::BeginFrame();
+
+            ImDrawList* scene_gizmo_draw_list = nullptr;
+            bool scene_gizmo_window_hovered = false;
+            bool overlay_window_hovered = false;
+            if (selected_mesh && !mouse_captured)
+            {
+                const ImGuiIO& io = ImGui::GetIO();
+                ImGui::SetNextWindowPos({0.0f, 0.0f});
+                ImGui::SetNextWindowSize(io.DisplaySize);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+                ImGui::Begin("SceneGizmo",
+                             nullptr,
+                             ImGuiWindowFlags_NoTitleBar
+                             | ImGuiWindowFlags_NoResize
+                             | ImGuiWindowFlags_NoMove
+                             | ImGuiWindowFlags_NoScrollbar
+                             | ImGuiWindowFlags_NoScrollWithMouse
+                             | ImGuiWindowFlags_NoSavedSettings
+                             | ImGuiWindowFlags_NoBackground
+                             | ImGuiWindowFlags_NoBringToFrontOnFocus);
+                scene_gizmo_draw_list = ImGui::GetWindowDrawList();
+                scene_gizmo_window_hovered = ImGui::IsWindowHovered();
+                ImGui::End();
+                ImGui::PopStyleVar(2);
+            }
 
             const bool insert_pressed = glfwGetKey(m_window, GLFW_KEY_INSERT) == GLFW_PRESS;
             if (insert_pressed && !insert_was_pressed)
@@ -209,6 +243,8 @@ namespace rose::core
                 ImGui::SetNextWindowPos({16.f, 16.f}, ImGuiCond_FirstUseEver);
                 ImGui::SetNextWindowSize({320.f, 0.f}, ImGuiCond_FirstUseEver);
                 ImGui::Begin("ROSE Overlay", &imgui_window_open, ImGuiWindowFlags_AlwaysAutoResize);
+                overlay_window_hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows
+                                                                | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
                 ImGui::Text("Application average %.3f ms/frame (%.1f FPS)",
                             1000.0 / ImGui::GetIO().Framerate,
                             ImGui::GetIO().Framerate);
@@ -240,6 +276,32 @@ namespace rose::core
                     m_renderer->set_dlss_quality(static_cast<vulkan::DlssQuality>(dlss_quality));
                 ImGui::EndDisabled();
                 ImGui::TextWrapped("%s", m_renderer->dlss_status().c_str());
+                ImGui::Separator();
+                if (selected_mesh)
+                    ImGui::Text("Selected mesh: %zu", *selected_mesh);
+                else
+                    ImGui::TextUnformatted("Selected mesh: none");
+                ImGui::BeginDisabled(!selected_mesh);
+                if (ImGui::RadioButton("Move", gizmo_operation == ImGuizmo::TRANSLATE))
+                    gizmo_operation = ImGuizmo::TRANSLATE;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Rotate", gizmo_operation == ImGuizmo::ROTATE))
+                    gizmo_operation = ImGuizmo::ROTATE;
+
+                if (ImGui::RadioButton("World", gizmo_mode == ImGuizmo::WORLD))
+                    gizmo_mode = ImGuizmo::WORLD;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Local", gizmo_mode == ImGuizmo::LOCAL))
+                    gizmo_mode = ImGuizmo::LOCAL;
+
+                ImGui::Checkbox("Snap", &gizmo_snap_enabled);
+                ImGui::BeginDisabled(!gizmo_snap_enabled);
+                if (gizmo_operation == ImGuizmo::ROTATE)
+                    ImGui::SliderFloat("Rotate snap", &gizmo_rotate_snap, 1.0f, 90.0f, "%.1f deg");
+                else
+                    ImGui::SliderFloat("Move snap", &gizmo_translate_snap, 0.01f, 10.0f, "%.2f m");
+                ImGui::EndDisabled();
+                ImGui::EndDisabled();
                 ImGui::End();
 
                 if (!imgui_window_open)
@@ -291,9 +353,57 @@ namespace rose::core
             player.update(delta_time, world, input);
             camera.set_origin(player.get_eye_position());
             camera.set_view_angles(player.get_view_angles());
+            framebuffer = m_renderer->framebuffer_size();
+            camera.set_view_port({static_cast<float>(framebuffer.x), static_cast<float>(framebuffer.y)});
+
+            if (selected_mesh && !mouse_captured && scene_gizmo_draw_list != nullptr)
+            {
+                if (auto model_matrix = map.mesh_matrix(*selected_mesh))
+                {
+                    const ImGuiIO& io = ImGui::GetIO();
+                    auto gizmo_camera = camera;
+                    gizmo_camera.set_view_port({io.DisplaySize.x, io.DisplaySize.y});
+
+                    auto matrix = model_matrix->raw_array();
+                    const auto view = gizmo_camera.get_view_matrix().raw_array();
+                    const auto projection = gizmo_camera.get_projection_matrix().raw_array();
+
+                    ImGuizmo::SetOrthographic(false);
+                    ImGuizmo::SetDrawlist(scene_gizmo_draw_list);
+                    ImGuizmo::SetRect(0.0f,
+                                      0.0f,
+                                      io.DisplaySize.x,
+                                      io.DisplaySize.y);
+
+                    std::array<float, 3> snap_values{};
+                    if (gizmo_operation == ImGuizmo::ROTATE)
+                        snap_values = {gizmo_rotate_snap, gizmo_rotate_snap, gizmo_rotate_snap};
+                    else
+                        snap_values = {gizmo_translate_snap, gizmo_translate_snap, gizmo_translate_snap};
+
+                    if (ImGuizmo::Manipulate(view.data(),
+                                             projection.data(),
+                                             gizmo_operation,
+                                             gizmo_mode,
+                                             matrix.data(),
+                                             nullptr,
+                                             gizmo_snap_enabled ? snap_values.data() : nullptr))
+                    {
+                        if (gizmo_operation == ImGuizmo::TRANSLATE)
+                            map.set_mesh_origin(*selected_mesh, {matrix[12], matrix[13], matrix[14]});
+                        else
+                            map.set_mesh_matrix(*selected_mesh, omath::opengl_engine::Mat4X4(matrix.data()));
+                    }
+                }
+            }
 
             const bool left_mouse_pressed = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-            if (!mouse_captured && left_mouse_pressed && !left_mouse_was_pressed && !ImGui::GetIO().WantCaptureMouse)
+            if (!mouse_captured
+                && left_mouse_pressed
+                && !left_mouse_was_pressed
+                && (!ImGui::GetIO().WantCaptureMouse || (scene_gizmo_window_hovered && !overlay_window_hovered))
+                && !ImGuizmo::IsOver()
+                && !ImGuizmo::IsUsing())
             {
                 double cursor_x = 0.0;
                 double cursor_y = 0.0;
@@ -302,9 +412,6 @@ namespace rose::core
                 int window_width = 1;
                 int window_height = 1;
                 glfwGetWindowSize(m_window, &window_width, &window_height);
-
-                framebuffer = m_renderer->framebuffer_size();
-                camera.set_view_port({static_cast<float>(framebuffer.x), static_cast<float>(framebuffer.y)});
 
                 const float scale_x = window_width > 0
                     ? static_cast<float>(framebuffer.x) / static_cast<float>(window_width)

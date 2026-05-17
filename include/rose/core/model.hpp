@@ -40,6 +40,9 @@ namespace rose::core
         }
 
         [[nodiscard]] const std::vector<vulkan::Mesh>& get_meshes() const { return m_meshes; }
+        [[nodiscard]] std::optional<omath::opengl_engine::Mat4X4> mesh_matrix(std::size_t mesh_index) const;
+        void set_mesh_origin(std::size_t mesh_index, const omath::Vector3<float>& origin);
+        void set_mesh_matrix(std::size_t mesh_index, const omath::opengl_engine::Mat4X4& matrix);
         [[nodiscard]] std::optional<std::size_t> pick_mesh(const omath::Vector2<float>& screen_position,
                                                            const omath::opengl_engine::Camera& camera) const;
 
