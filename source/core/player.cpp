@@ -81,6 +81,8 @@ namespace rose::core
         {
             m_noclip   = !m_noclip;
             m_velocity = {};
+            m_jump_buffer_timer = 0.f;
+            m_ground_grace_timer = 0.f;
         }
         m_noclip_was_pressed = input.noclip;
 
@@ -122,6 +124,7 @@ namespace rose::core
             pos.y += move.y * k_max_speed * dt;
             pos.z += move.z * k_max_speed * dt;
             m_collider.set_origin(pos);
+            m_jump_was_pressed = input.jump;
             return;
         }
 
@@ -146,38 +149,49 @@ namespace rose::core
             wish_speed = k_max_speed;
         }
 
-        // --- Queue jump for bhop ---
-        if (input.jump)
-            m_jump_queued = true;
-        else
-            m_jump_queued = false;
+        const bool jump_pressed = input.jump;
+        const bool jump_started = jump_pressed && !m_jump_was_pressed;
+        m_jump_was_pressed = jump_pressed;
 
-        // --- Ground / air movement ---
+        if (m_is_grounded)
+            m_ground_grace_timer = k_ground_grace_time;
+        else if (m_ground_grace_timer > 0.f)
+            m_ground_grace_timer = (m_ground_grace_timer > dt) ? (m_ground_grace_timer - dt) : 0.f;
+
+        if (jump_started || (input.auto_bhop && jump_pressed))
+            m_jump_buffer_timer = k_jump_buffer_time;
+        else if (m_jump_buffer_timer > 0.f)
+            m_jump_buffer_timer = (m_jump_buffer_timer > dt) ? (m_jump_buffer_timer - dt) : 0.f;
+
+        const bool can_jump = m_is_grounded || m_ground_grace_timer > 0.f;
+        const bool should_jump = m_jump_buffer_timer > 0.f && can_jump;
+
+        // --- Source-style ground / air movement ---
+        if (m_is_grounded)
+            m_velocity.y = 0.f;
+
+        if (should_jump)
+        {
+            // Source skips ground friction on the jump frame.
+            m_velocity.y  = k_jump_speed;
+            m_is_grounded = false;
+            m_jump_buffer_timer = 0.f;
+            m_ground_grace_timer = 0.f;
+        }
+        else if (m_is_grounded)
+        {
+            apply_friction(dt);
+        }
+
         if (m_is_grounded)
         {
-            if (m_jump_queued)
-            {
-                // Bhop: jump immediately, skip friction to preserve speed
-                m_velocity.y  = k_jump_speed;
-                m_is_grounded = false;
-                m_jump_queued = false;
-            }
-            else
-            {
-                apply_friction(dt);
-            }
             accelerate(wish_dir, wish_speed, k_ground_accel, dt);
         }
         else
         {
-            accelerate(wish_dir, wish_speed, k_air_accel, dt);
-            if (wish_speed > 0.f)
-                air_control(wish_dir, dt);
+            air_accelerate(wish_dir, wish_speed, k_air_accel, dt);
+            m_velocity.y += k_gravity * 0.5f * dt;
         }
-
-        // --- Gravity ---
-        if (!m_is_grounded)
-            m_velocity.y += k_gravity * dt;
 
         // --- Integrate position ---
         auto position = m_collider.get_origin();
@@ -191,6 +205,11 @@ namespace rose::core
 
         for (int i = 0; i < 5; i++)
             resolve_collisions(world);
+
+        if (!m_is_grounded)
+            m_velocity.y += k_gravity * 0.5f * dt;
+        else if (m_velocity.y < 0.f)
+            m_velocity.y = 0.f;
     }
 
     void Player::accelerate(
@@ -201,6 +220,29 @@ namespace rose::core
     {
         const float current_speed = m_velocity.x * wish_dir.x + m_velocity.z * wish_dir.z;
         const float add_speed = wish_speed - current_speed;
+        if (add_speed <= 0.f)
+            return;
+
+        float accel_speed = accel * wish_speed * dt;
+        if (accel_speed > add_speed)
+            accel_speed = add_speed;
+
+        m_velocity.x += accel_speed * wish_dir.x;
+        m_velocity.z += accel_speed * wish_dir.z;
+    }
+
+    void Player::air_accelerate(
+            const omath::Vector3<float>& wish_dir,
+            float wish_speed,
+            float accel,
+            float dt)
+    {
+        float wish_spd = wish_speed;
+        if (wish_spd > k_air_speed_cap)
+            wish_spd = k_air_speed_cap;
+
+        const float current_speed = m_velocity.x * wish_dir.x + m_velocity.z * wish_dir.z;
+        const float add_speed = wish_spd - current_speed;
         if (add_speed <= 0.f)
             return;
 
@@ -233,28 +275,18 @@ namespace rose::core
         m_velocity.z *= new_speed;
     }
 
-    void Player::air_control(const omath::Vector3<float>& wish_dir, float dt)
+    void Player::clip_velocity(const omath::Vector3<float>& normal)
     {
-        const float speed = std::sqrt(m_velocity.x * m_velocity.x + m_velocity.z * m_velocity.z);
-        if (speed < 0.1f)
+        const float backoff =
+                m_velocity.x * normal.x +
+                m_velocity.y * normal.y +
+                m_velocity.z * normal.z;
+        if (backoff >= 0.f)
             return;
 
-        // Rotate horizontal velocity direction toward wish_dir, preserving speed
-        const float inv = 1.f / speed;
-        const float vx = m_velocity.x * inv;
-        const float vz = m_velocity.z * inv;
-
-        const float max_turn = k_air_control * dt;
-        const float t = std::min(max_turn, 1.f);
-
-        const float new_x = vx + (wish_dir.x - vx) * t;
-        const float new_z = vz + (wish_dir.z - vz) * t;
-        const float len = std::sqrt(new_x * new_x + new_z * new_z);
-        if (len < 1e-6f)
-            return;
-
-        m_velocity.x = (new_x / len) * speed;
-        m_velocity.z = (new_z / len) * speed;
+        m_velocity.x -= normal.x * backoff;
+        m_velocity.y -= normal.y * backoff;
+        m_velocity.z -= normal.z * backoff;
     }
 
     void Player::resolve_collisions(const CollisionWorld& world)
@@ -283,14 +315,29 @@ namespace rose::core
                 continue;
 
             const auto& pv = result->penetration_vector;
+            const float pv_len = pv.length();
+            if (pv_len < 1e-6f)
+                continue;
+
+            const float inv_len = 1.f / pv_len;
+            const omath::Vector3<float> normal = {
+                pv.x * inv_len,
+                pv.y * inv_len,
+                pv.z * inv_len
+            };
+
             m_collider.set_origin(m_collider.get_origin() + (pv * 1.005f));
-            const float up_dot = pv.y / pv.length();
+            clip_velocity(normal);
+
+            const float up_dot = normal.y;
 
             if (up_dot > k_floor_dot)
             {
-                m_is_grounded = true;
-                if (m_velocity.y < 0.f)
+                if (m_velocity.y <= 0.f)
+                {
+                    m_is_grounded = true;
                     m_velocity.y = 0.f;
+                }
             }
             else if (up_dot < -k_floor_dot)
             {

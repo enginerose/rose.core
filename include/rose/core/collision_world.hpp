@@ -4,6 +4,7 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <unordered_map>
@@ -59,7 +60,7 @@ namespace rose::core
     // ---------------------------------------------------------------------------
     // Spatial-hash collision world.
     //
-    // Build once at load time with CollisionWorld::build().
+    // Build at load time with CollisionWorld::build().
     // Each MeshCollider is inserted into every chunk its AABB overlaps.
     // At runtime, query() returns only the collider indices whose chunks
     // overlap a given AABB, giving an O(1)-ish broadphase.
@@ -86,21 +87,21 @@ namespace rose::core
             {
                 const Aabb box = Aabb::from_collider(world.colliders[i]);
                 world.aabbs.push_back(box);
-
-                // Register this collider in every chunk its AABB overlaps.
-                const int ix0 = chunk_coord(box.min.x);
-                const int iy0 = chunk_coord(box.min.y);
-                const int iz0 = chunk_coord(box.min.z);
-                const int ix1 = chunk_coord(box.max.x);
-                const int iy1 = chunk_coord(box.max.y);
-                const int iz1 = chunk_coord(box.max.z);
-
-                for (int ix = ix0; ix <= ix1; ++ix)
-                    for (int iy = iy0; iy <= iy1; ++iy)
-                        for (int iz = iz0; iz <= iz1; ++iz)
-                            world.chunks[encode(ix, iy, iz)].push_back(i);
+                world.insert_collider_chunks(i, box);
             }
             return world;
+        }
+
+        void update_collider(const std::size_t index, Collider collider)
+        {
+            if (index >= colliders.size())
+                return;
+
+            const int collider_index = static_cast<int>(index);
+            remove_collider_chunks(collider_index, aabbs[index]);
+            colliders[index] = std::move(collider);
+            aabbs[index] = Aabb::from_collider(colliders[index]);
+            insert_collider_chunks(collider_index, aabbs[index]);
         }
 
         // Fill `out` with the (sorted, deduplicated) indices of colliders that
@@ -133,6 +134,45 @@ namespace rose::core
         static int chunk_coord(float v) noexcept
         {
             return static_cast<int>(std::floor(v / k_chunk_size));
+        }
+
+        void insert_collider_chunks(const int index, const Aabb& box)
+        {
+            const int ix0 = chunk_coord(box.min.x);
+            const int iy0 = chunk_coord(box.min.y);
+            const int iz0 = chunk_coord(box.min.z);
+            const int ix1 = chunk_coord(box.max.x);
+            const int iy1 = chunk_coord(box.max.y);
+            const int iz1 = chunk_coord(box.max.z);
+
+            for (int ix = ix0; ix <= ix1; ++ix)
+                for (int iy = iy0; iy <= iy1; ++iy)
+                    for (int iz = iz0; iz <= iz1; ++iz)
+                        chunks[encode(ix, iy, iz)].push_back(index);
+        }
+
+        void remove_collider_chunks(const int index, const Aabb& box)
+        {
+            const int ix0 = chunk_coord(box.min.x);
+            const int iy0 = chunk_coord(box.min.y);
+            const int iz0 = chunk_coord(box.min.z);
+            const int ix1 = chunk_coord(box.max.x);
+            const int iy1 = chunk_coord(box.max.y);
+            const int iz1 = chunk_coord(box.max.z);
+
+            for (int ix = ix0; ix <= ix1; ++ix)
+                for (int iy = iy0; iy <= iy1; ++iy)
+                    for (int iz = iz0; iz <= iz1; ++iz)
+                    {
+                        const auto chunk = chunks.find(encode(ix, iy, iz));
+                        if (chunk == chunks.end())
+                            continue;
+
+                        auto& indices = chunk->second;
+                        std::erase(indices, index);
+                        if (indices.empty())
+                            chunks.erase(chunk);
+                    }
         }
 
         // Pack three signed 21-bit chunk coordinates into a 63-bit key.

@@ -105,7 +105,7 @@ namespace rose::core
         raw_colliders.reserve(map.get_meshes().size());
         for (const auto& mesh : map.get_meshes())
             raw_colliders.emplace_back(mesh.cpu_mesh());
-        const auto world = CollisionWorld::build(std::move(raw_colliders));
+        auto world = CollisionWorld::build(std::move(raw_colliders));
         spdlog::info("Collision world ready ({} colliders, chunk size {:.0f} m).",
                      world.colliders.size(), CollisionWorld::k_chunk_size);
 
@@ -133,6 +133,7 @@ namespace rose::core
         int    windowed_height = m_window_size.y;
         bool   restore_mouse_capture_after_overlay = false;
         bool   fps_cap_enabled = true;
+        bool   auto_bhop = false;
         int    fps_limit = 60;
         std::optional<std::size_t> selected_mesh;
         ImGuizmo::OPERATION gizmo_operation = ImGuizmo::TRANSLATE;
@@ -140,6 +141,7 @@ namespace rose::core
         bool   gizmo_snap_enabled = false;
         float  gizmo_translate_snap = 0.5f;
         float  gizmo_rotate_snap = 15.0f;
+        float  gizmo_scale_snap = 0.1f;
         bool   first_mouse  = true;
         double last_mouse_x = 0.0;
         double last_mouse_y = 0.0;
@@ -254,6 +256,7 @@ namespace rose::core
                 ImGui::BeginDisabled(!fps_cap_enabled);
                 ImGui::SliderInt("FPS limit", &fps_limit, 30, 360);
                 ImGui::EndDisabled();
+                ImGui::Checkbox("Auto bhop", &auto_bhop);
                 ImGui::Separator();
 
                 bool dlss_enabled = m_renderer->dlss_enabled();
@@ -288,6 +291,9 @@ namespace rose::core
                 ImGui::SameLine();
                 if (ImGui::RadioButton("Rotate", gizmo_operation == ImGuizmo::ROTATE))
                     gizmo_operation = ImGuizmo::ROTATE;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Scale", gizmo_operation == ImGuizmo::SCALE))
+                    gizmo_operation = ImGuizmo::SCALE;
 
                 if (ImGui::RadioButton("World", gizmo_mode == ImGuizmo::WORLD))
                     gizmo_mode = ImGuizmo::WORLD;
@@ -299,6 +305,8 @@ namespace rose::core
                 ImGui::BeginDisabled(!gizmo_snap_enabled);
                 if (gizmo_operation == ImGuizmo::ROTATE)
                     ImGui::SliderFloat("Rotate snap", &gizmo_rotate_snap, 1.0f, 90.0f, "%.1f deg");
+                else if (gizmo_operation == ImGuizmo::SCALE)
+                    ImGui::SliderFloat("Scale snap", &gizmo_scale_snap, 0.01f, 1.0f, "%.2f");
                 else
                     ImGui::SliderFloat("Move snap", &gizmo_translate_snap, 0.01f, 10.0f, "%.2f m");
                 ImGui::EndDisabled();
@@ -340,9 +348,12 @@ namespace rose::core
                 && !overlay_window_hovered
                 && !ImGuizmo::IsUsing())
             {
-                gizmo_operation = gizmo_operation == ImGuizmo::TRANSLATE
-                    ? ImGuizmo::ROTATE
-                    : ImGuizmo::TRANSLATE;
+                if (gizmo_operation == ImGuizmo::TRANSLATE)
+                    gizmo_operation = ImGuizmo::ROTATE;
+                else if (gizmo_operation == ImGuizmo::ROTATE)
+                    gizmo_operation = ImGuizmo::SCALE;
+                else
+                    gizmo_operation = ImGuizmo::TRANSLATE;
             }
             middle_mouse_was_pressed = middle_mouse_pressed;
 
@@ -361,6 +372,7 @@ namespace rose::core
                 input.right    = glfwGetKey(m_window, GLFW_KEY_D)     == GLFW_PRESS;
                 input.left     = glfwGetKey(m_window, GLFW_KEY_A)     == GLFW_PRESS;
                 input.jump     = glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS;
+                input.auto_bhop = auto_bhop;
                 input.noclip   = glfwGetKey(m_window, GLFW_KEY_Q)     == GLFW_PRESS;
             }
 
@@ -410,6 +422,8 @@ namespace rose::core
                     std::array<float, 3> snap_values{};
                     if (gizmo_operation == ImGuizmo::ROTATE)
                         snap_values = {gizmo_rotate_snap, gizmo_rotate_snap, gizmo_rotate_snap};
+                    else if (gizmo_operation == ImGuizmo::SCALE)
+                        snap_values = {gizmo_scale_snap, gizmo_scale_snap, gizmo_scale_snap};
                     else
                         snap_values = {gizmo_translate_snap, gizmo_translate_snap, gizmo_translate_snap};
 
@@ -427,6 +441,10 @@ namespace rose::core
                         }
                         else
                             map.set_mesh_matrix(*selected_mesh, omath::opengl_engine::Mat4X4(matrix.data()));
+
+                        world.update_collider(
+                            *selected_mesh,
+                            CollisionWorld::Collider(map.get_meshes()[*selected_mesh].cpu_mesh()));
                     }
                 }
             }
