@@ -13,6 +13,8 @@
 #include "rose/core/vulkan/renderer.hpp"
 #include "rose/plugins/plugin_sdk.hpp"
 
+#include "stb_image_write.h"
+
 #include <GLFW/glfw3.h>
 #include <boost/dll.hpp>
 #include <imgui.h>
@@ -24,15 +26,59 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <cstdlib>
+#include <cstring>
+#include <exception>
 #include <iterator>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 
 static void GlfwErrorCallback(int code, const char* desc)
 {
     spdlog::error("GLFW error {}: {}", code, desc);
+}
+
+static std::vector<std::byte> EncodeStreamFrame(const rose::core::vulkan::CapturedFrame& frame)
+{
+    if (frame.pixels.empty() || frame.width == 0 || frame.height == 0)
+        return {};
+
+    const auto* source = reinterpret_cast<const unsigned char*>(frame.pixels.data());
+    const unsigned char* pixels = source;
+    std::vector<unsigned char> rgba;
+    if (frame.format == rose::core::vulkan::CapturedFrameFormat::Bgra)
+    {
+        rgba.resize(frame.pixels.size());
+        for (std::size_t index = 0; index < frame.pixels.size(); index += 4u)
+        {
+            rgba[index] = source[index + 2u];
+            rgba[index + 1u] = source[index + 1u];
+            rgba[index + 2u] = source[index];
+            rgba[index + 3u] = source[index + 3u];
+        }
+        pixels = rgba.data();
+    }
+
+    std::vector<std::byte> bmp;
+    stbi_write_bmp_to_func(
+        [](void* context, void* data, int size)
+        {
+            auto* output = static_cast<std::vector<std::byte>*>(context);
+            const auto* bytes = static_cast<std::byte*>(data);
+            output->insert(output->end(), bytes, bytes + size);
+        },
+        &bmp,
+        static_cast<int>(frame.width),
+        static_cast<int>(frame.height),
+        4,
+        pixels);
+    return bmp;
 }
 
 namespace rose::core
@@ -90,13 +136,114 @@ namespace rose::core
     {
         const boost::dll::fs::path lib_path("rose.stream.dll");
         using pluginapi_create_t = std::shared_ptr<StreamPluginApi>();
-        auto creator = boost::dll::import_alias<pluginapi_create_t>(
-            lib_path,
-            "create_plugin",
-            boost::dll::load_mode::default_mode
-        );
-        std::shared_ptr<StreamPluginApi> plugin = creator();
-        plugin->run();
+        std::shared_ptr<StreamPluginApi> plugin;
+        try
+        {
+            auto creator = boost::dll::import_alias<pluginapi_create_t>(
+                lib_path,
+                "create_plugin",
+                boost::dll::load_mode::default_mode
+            );
+            plugin = creator();
+            if (plugin != nullptr)
+                plugin->run();
+        }
+        catch (const std::exception& exception)
+        {
+            spdlog::warn("Frame streaming disabled: {}", exception.what());
+        }
+
+        std::mutex stream_mutex;
+        std::condition_variable stream_condition;
+        std::optional<vulkan::CapturedFrame> pending_stream_frame;
+        std::atomic_bool stream_ready = false;
+        std::atomic_bool stream_worker_busy = false;
+        bool stop_stream_worker = false;
+        std::thread stream_worker;
+        if (plugin != nullptr)
+        {
+            stream_worker = std::thread(
+                [plugin,
+                 &stream_mutex,
+                 &stream_condition,
+                 &pending_stream_frame,
+                 &stream_ready,
+                 &stream_worker_busy,
+                 &stop_stream_worker]
+                {
+                    bool poll_error_logged = false;
+                    bool push_error_logged = false;
+                    while (true)
+                    {
+                        std::optional<vulkan::CapturedFrame> frame;
+                        {
+                            std::unique_lock lock(stream_mutex);
+                            stream_condition.wait_for(lock, std::chrono::milliseconds(100), [&]
+                            {
+                                return stop_stream_worker || pending_stream_frame.has_value();
+                            });
+                            if (stop_stream_worker)
+                                break;
+                            if (!pending_stream_frame)
+                            {
+                                lock.unlock();
+                                try
+                                {
+                                    stream_ready.store(plugin->is_ready_to_stream(), std::memory_order_release);
+                                }
+                                catch (const std::exception& exception)
+                                {
+                                    stream_ready.store(false, std::memory_order_release);
+                                    if (!poll_error_logged)
+                                    {
+                                        spdlog::warn("Frame streaming readiness check failed: {}", exception.what());
+                                        poll_error_logged = true;
+                                    }
+                                }
+                                continue;
+                            }
+                            frame = std::move(pending_stream_frame);
+                            pending_stream_frame.reset();
+                        }
+
+                        if (!frame)
+                            continue;
+
+                        stream_worker_busy.store(true, std::memory_order_release);
+                        try
+                        {
+                            std::vector<std::byte> bmp = EncodeStreamFrame(*frame);
+                            if (!bmp.empty())
+                                plugin->push_frame(bmp);
+                            stream_ready.store(true, std::memory_order_release);
+                        }
+                        catch (const std::exception& exception)
+                        {
+                            if (!push_error_logged)
+                            {
+                                spdlog::warn("Frame streaming push failed: {}", exception.what());
+                                push_error_logged = true;
+                            }
+                        }
+                        stream_worker_busy.store(false, std::memory_order_release);
+                    }
+                });
+        }
+
+        const auto stream_has_pending_frame = [&]
+        {
+            std::lock_guard lock(stream_mutex);
+            return pending_stream_frame.has_value();
+        };
+
+        const auto queue_stream_frame = [&](vulkan::CapturedFrame frame)
+        {
+            {
+                std::lock_guard lock(stream_mutex);
+                pending_stream_frame = std::move(frame);
+            }
+            stream_condition.notify_one();
+        };
 
         auto map = Model("map2.glb");
 
@@ -121,6 +268,8 @@ namespace rose::core
             10000.f
         };
 
+        constexpr float radians_per_degree = 3.14159265358979323846f / 180.0f;
+        constexpr float degrees_per_radian = 180.0f / 3.14159265358979323846f;
         bool   mouse_captured  = false;
         bool   esc_was_pressed = false;
         bool   overlay_open = false;
@@ -134,6 +283,8 @@ namespace rose::core
         bool   restore_mouse_capture_after_overlay = false;
         bool   fps_cap_enabled = true;
         bool   auto_bhop = false;
+        bool   wallrun_enabled = false;
+        float  ground_max_slope_degrees = std::acos(Player::k_floor_dot) * degrees_per_radian;
         int    fps_limit = 60;
         std::optional<std::size_t> selected_mesh;
         ImGuizmo::OPERATION gizmo_operation = ImGuizmo::TRANSLATE;
@@ -148,6 +299,8 @@ namespace rose::core
         double last_time    = glfwGetTime();
         bool   left_mouse_was_pressed = false;
         bool   middle_mouse_was_pressed = false;
+        double next_stream_capture_time = 0.0;
+        constexpr double stream_capture_interval = 1.0 / 30.0;
 
         const auto set_mouse_captured = [&](const bool captured)
         {
@@ -257,6 +410,11 @@ namespace rose::core
                 ImGui::SliderInt("FPS limit", &fps_limit, 30, 360);
                 ImGui::EndDisabled();
                 ImGui::Checkbox("Auto bhop", &auto_bhop);
+                ImGui::Checkbox("Wallrun", &wallrun_enabled);
+                if (ImGui::SliderFloat("Ground max slope", &ground_max_slope_degrees, 0.0f, 89.0f, "%.1f deg"))
+                {
+                    player.set_floor_dot(std::cos(ground_max_slope_degrees * radians_per_degree));
+                }
                 ImGui::Separator();
 
                 bool dlss_enabled = m_renderer->dlss_enabled();
@@ -373,6 +531,7 @@ namespace rose::core
                 input.left     = glfwGetKey(m_window, GLFW_KEY_A)     == GLFW_PRESS;
                 input.jump     = glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS;
                 input.auto_bhop = auto_bhop;
+                input.wallrun  = wallrun_enabled;
                 input.noclip   = glfwGetKey(m_window, GLFW_KEY_Q)     == GLFW_PRESS;
             }
 
@@ -485,10 +644,19 @@ namespace rose::core
                 map.draw(*m_renderer, camera, selected_mesh);
                 m_renderer->render_imgui(ImGui::GetDrawData());
 
-                const bool capture_frame = plugin->is_ready_to_stream();
-                auto bmp_data = m_renderer->end_frame(capture_frame);
-                if (capture_frame && !bmp_data.empty())
-                    plugin->push_frame(bmp_data);
+                bool capture_frame = false;
+                if (plugin != nullptr
+                    && current_time >= next_stream_capture_time
+                    && stream_ready.load(std::memory_order_acquire)
+                    && !stream_worker_busy.load(std::memory_order_acquire)
+                    && !stream_has_pending_frame())
+                {
+                    capture_frame = true;
+                    next_stream_capture_time = current_time + stream_capture_interval;
+                }
+                auto stream_frame = m_renderer->end_frame(capture_frame);
+                if (stream_frame && plugin != nullptr)
+                    queue_stream_frame(std::move(*stream_frame));
             }
 
             framebuffer = m_renderer->framebuffer_size();
@@ -504,6 +672,17 @@ namespace rose::core
                 while (glfwGetTime() < frame_target)
                     ;
             }
+        }
+
+        if (stream_worker.joinable())
+        {
+            {
+                std::lock_guard lock(stream_mutex);
+                stop_stream_worker = true;
+                pending_stream_frame.reset();
+            }
+            stream_condition.notify_one();
+            stream_worker.join();
         }
 
         m_renderer->wait_idle();

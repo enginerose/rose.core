@@ -7,7 +7,7 @@ file(GLOB_RECURSE ROSE_SOURCES source/*.cpp)
 
 add_executable(${PROJECT_NAME} ${ROSE_HEADERS} ${ROSE_SOURCES})
 
-option(ROSE_DYNAMIC_MSVC_RUNTIME "Use the dynamic MSVC runtime library" OFF)
+option(ROSE_DYNAMIC_MSVC_RUNTIME "Use the dynamic MSVC runtime library (/MD, /MDd)" ON)
 if (ROSE_DYNAMIC_MSVC_RUNTIME)
     set(ROSE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     set(OMATH_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
@@ -102,7 +102,21 @@ endforeach ()
 
 add_custom_target(rose_shaders DEPENDS ${ROSE_SHADER_OUTPUTS})
 add_dependencies(${PROJECT_NAME} rose_shaders)
-target_compile_definitions(${PROJECT_NAME} PRIVATE ROSE_SHADER_DIR="${ROSE_SHADER_OUTPUT_DIR}")
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+        ROSE_SHADER_DIR="${ROSE_SHADER_OUTPUT_DIR}"
+        ROSE_SHADER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+)
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${ROSE_SHADER_OUTPUTS}
+        ${ROSE_SHADER_SOURCES}
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${GLSLC_EXECUTABLE}"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+        VERBATIM
+)
 
 add_subdirectory(extlibs/omath)
 target_link_libraries(${PROJECT_NAME} PRIVATE asio::asio imgui::imgui imguizmo omath::omath glfw Vulkan::Vulkan spdlog::spdlog Boost::dll winmm)

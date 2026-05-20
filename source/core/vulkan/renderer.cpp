@@ -3,7 +3,6 @@
 //
 #include "rose/core/vulkan/renderer.hpp"
 
-#include "stb_image_write.h"
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #ifdef ROSE_ENABLE_NGX_DLSS
@@ -15,9 +14,14 @@
 #include <imgui_impl_vulkan.h>
 #include <spdlog/spdlog.h>
 
+#ifdef _WIN32
+#include <process.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -26,7 +30,9 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <unordered_map>
+#include <vector>
 
 namespace rose::core::vulkan
 {
@@ -58,15 +64,111 @@ namespace rose::core::vulkan
             }
         }
 
+        [[nodiscard]] std::optional<std::string> environment_value(const char* name)
+        {
+#ifdef _MSC_VER
+            char* value = nullptr;
+            std::size_t value_size = 0;
+            if (_dupenv_s(&value, &value_size, name) != 0 || value == nullptr)
+                return std::nullopt;
+            std::string result(value);
+            std::free(value);
+            if (result.empty())
+                return std::nullopt;
+            return result;
+#else
+            const char* value = std::getenv(name);
+            if (value == nullptr || value[0] == '\0')
+                return std::nullopt;
+            return std::string(value);
+#endif
+        }
+
+        [[nodiscard]] std::string quote_command_arg(const std::filesystem::path& path)
+        {
+            std::string result = "\"";
+            for (const char c : path.string())
+            {
+                if (c == '"')
+                    result += "\\\"";
+                else
+                    result += c;
+            }
+            result += "\"";
+            return result;
+        }
+
+        [[nodiscard]] int run_glslc(const std::filesystem::path& compiler_path,
+                                    const std::filesystem::path& source_path,
+                                    const std::filesystem::path& output_path)
+        {
+#ifdef _WIN32
+            const std::wstring compiler = compiler_path.wstring();
+            const std::wstring target_env = L"--target-env=vulkan1.2";
+            const std::wstring source = source_path.wstring();
+            const std::wstring output_flag = L"-o";
+            const std::wstring output = output_path.wstring();
+            const wchar_t* args[] = {
+                compiler.c_str(),
+                target_env.c_str(),
+                source.c_str(),
+                output_flag.c_str(),
+                output.c_str(),
+                nullptr
+            };
+            return static_cast<int>(_wspawnvp(_P_WAIT, compiler.c_str(), args));
+#else
+            const std::string command = quote_command_arg(compiler_path)
+                                      + " --target-env=vulkan1.2 "
+                                      + quote_command_arg(source_path)
+                                      + " -o "
+                                      + quote_command_arg(output_path);
+            return std::system(command.c_str());
+#endif
+        }
+
+        [[nodiscard]] std::filesystem::path glslc_path()
+        {
+#ifdef _WIN32
+            constexpr const char* glslc_filename = "glslc.exe";
+#else
+            constexpr const char* glslc_filename = "glslc";
+#endif
+            std::error_code ec;
+            const std::filesystem::path local_glslc = std::filesystem::current_path(ec) / glslc_filename;
+            if (!ec && std::filesystem::exists(local_glslc))
+                return local_glslc;
+
+            if (const auto vulkan_sdk = environment_value("VULKAN_SDK"))
+            {
+#ifdef _WIN32
+                const std::filesystem::path sdk_glslc = std::filesystem::path(*vulkan_sdk) / "Bin" / glslc_filename;
+#else
+                const std::filesystem::path sdk_glslc = std::filesystem::path(*vulkan_sdk) / "bin" / glslc_filename;
+#endif
+                if (std::filesystem::exists(sdk_glslc))
+                    return sdk_glslc;
+            }
+
+            return glslc_filename;
+        }
+
         [[nodiscard]] std::vector<char> read_binary_file(const std::filesystem::path& path)
         {
+            spdlog::info("Vulkan: loading shader '{}'", path.string());
             std::ifstream file(path, std::ios::ate | std::ios::binary);
             if (!file)
+            {
+                spdlog::critical("Vulkan: failed to open shader '{}'", path.string());
                 throw VulkanError("Failed to open shader file: " + path.string());
+            }
 
             const auto end = file.tellg();
             if (end <= 0)
+            {
+                spdlog::critical("Vulkan: shader file is empty '{}'", path.string());
                 throw VulkanError("Shader file is empty: " + path.string());
+            }
 
             std::vector<char> buffer(static_cast<std::size_t>(end));
             file.seekg(0, std::ios::beg);
@@ -76,11 +178,73 @@ namespace rose::core::vulkan
 
         [[nodiscard]] std::filesystem::path shader_path(const char* filename)
         {
+            const std::filesystem::path relative_path = std::filesystem::path("shaders") / filename;
+            std::error_code ec;
+            const std::filesystem::path cwd_path = std::filesystem::current_path(ec) / relative_path;
+            if (!ec && std::filesystem::exists(cwd_path))
+                return cwd_path;
+            if (std::filesystem::exists(relative_path))
+                return relative_path;
+
+            std::optional<std::filesystem::path> build_path;
 #ifdef ROSE_SHADER_DIR
-            return std::filesystem::path(ROSE_SHADER_DIR) / filename;
-#else
-            return std::filesystem::path("shaders") / filename;
+            build_path = std::filesystem::path(ROSE_SHADER_DIR) / filename;
 #endif
+
+            std::filesystem::path source_filename = filename;
+            if (source_filename.extension() == ".spv")
+                source_filename.replace_extension();
+
+            std::vector<std::filesystem::path> source_candidates;
+            if (!ec)
+                source_candidates.push_back(std::filesystem::current_path(ec) / "shaders" / source_filename);
+            source_candidates.push_back(std::filesystem::path("shaders") / source_filename);
+#ifdef ROSE_SHADER_SOURCE_DIR
+            source_candidates.push_back(std::filesystem::path(ROSE_SHADER_SOURCE_DIR) / source_filename);
+#endif
+
+            std::optional<std::filesystem::path> source_path;
+            for (const std::filesystem::path& candidate : source_candidates)
+            {
+                if (std::filesystem::exists(candidate))
+                {
+                    source_path = candidate;
+                    break;
+                }
+            }
+
+            const std::filesystem::path output_path = !ec ? cwd_path : relative_path;
+            if (!source_path)
+            {
+                if (build_path && std::filesystem::exists(*build_path))
+                    return *build_path;
+
+                spdlog::critical("Vulkan: shader binary '{}' is missing and GLSL source '{}' was not found",
+                                 output_path.string(),
+                                 source_filename.string());
+                return output_path;
+            }
+
+            if (const std::filesystem::path parent_path = output_path.parent_path(); !parent_path.empty())
+                std::filesystem::create_directories(parent_path, ec);
+
+            const std::filesystem::path compiler_path = glslc_path();
+            spdlog::warn("Vulkan: shader binary '{}' is missing, compiling '{}' with '{}'",
+                         output_path.string(),
+                         source_path->string(),
+                         compiler_path.string());
+            const int result = run_glslc(compiler_path, *source_path, output_path);
+            if (result != 0 || !std::filesystem::exists(output_path))
+            {
+                spdlog::critical("Vulkan: failed to compile shader '{}' to '{}' using '{}'",
+                                 source_path->string(),
+                                 output_path.string(),
+                                 compiler_path.string());
+                if (build_path && std::filesystem::exists(*build_path))
+                    return *build_path;
+            }
+
+            return output_path;
         }
 
         struct QueueFamilies final
@@ -139,6 +303,14 @@ namespace rose::core::vulkan
             VkSemaphore image_available = VK_NULL_HANDLE;
             VkSemaphore render_finished = VK_NULL_HANDLE;
             VkFence in_flight = VK_NULL_HANDLE;
+        };
+
+        struct ReadbackSlot final
+        {
+            BufferResource buffer;
+            VkExtent2D extent{};
+            VkFormat format = VK_FORMAT_UNDEFINED;
+            bool pending = false;
         };
 
         struct PushConstants final
@@ -230,6 +402,114 @@ namespace rose::core::vulkan
         {
             return format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_R8G8B8A8_UNORM;
         }
+
+        [[nodiscard]] const char* vk_format_name(VkFormat format) noexcept
+        {
+            switch (format)
+            {
+            case VK_FORMAT_B8G8R8A8_SRGB:
+                return "VK_FORMAT_B8G8R8A8_SRGB";
+            case VK_FORMAT_B8G8R8A8_UNORM:
+                return "VK_FORMAT_B8G8R8A8_UNORM";
+            case VK_FORMAT_R8G8B8A8_SRGB:
+                return "VK_FORMAT_R8G8B8A8_SRGB";
+            case VK_FORMAT_R8G8B8A8_UNORM:
+                return "VK_FORMAT_R8G8B8A8_UNORM";
+            case VK_FORMAT_R16G16_SFLOAT:
+                return "VK_FORMAT_R16G16_SFLOAT";
+            case VK_FORMAT_R32G32_SFLOAT:
+                return "VK_FORMAT_R32G32_SFLOAT";
+            case VK_FORMAT_D32_SFLOAT:
+                return "VK_FORMAT_D32_SFLOAT";
+            case VK_FORMAT_D32_SFLOAT_S8_UINT:
+                return "VK_FORMAT_D32_SFLOAT_S8_UINT";
+            case VK_FORMAT_D24_UNORM_S8_UINT:
+                return "VK_FORMAT_D24_UNORM_S8_UINT";
+            default:
+                return "VK_FORMAT_UNKNOWN";
+            }
+        }
+
+        [[nodiscard]] const char* present_mode_name(VkPresentModeKHR mode) noexcept
+        {
+            switch (mode)
+            {
+            case VK_PRESENT_MODE_IMMEDIATE_KHR:
+                return "VK_PRESENT_MODE_IMMEDIATE_KHR";
+            case VK_PRESENT_MODE_MAILBOX_KHR:
+                return "VK_PRESENT_MODE_MAILBOX_KHR";
+            case VK_PRESENT_MODE_FIFO_KHR:
+                return "VK_PRESENT_MODE_FIFO_KHR";
+            case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+                return "VK_PRESENT_MODE_FIFO_RELAXED_KHR";
+            default:
+                return "VK_PRESENT_MODE_UNKNOWN";
+            }
+        }
+
+        [[nodiscard]] const char* physical_device_type_name(VkPhysicalDeviceType type) noexcept
+        {
+            switch (type)
+            {
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+                return "integrated GPU";
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+                return "discrete GPU";
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+                return "virtual GPU";
+            case VK_PHYSICAL_DEVICE_TYPE_CPU:
+                return "CPU";
+            default:
+                return "other";
+            }
+        }
+
+        [[nodiscard]] std::string vulkan_version_string(uint32_t version)
+        {
+            return std::to_string(VK_VERSION_MAJOR(version)) + "."
+                 + std::to_string(VK_VERSION_MINOR(version)) + "."
+                 + std::to_string(VK_VERSION_PATCH(version));
+        }
+
+        [[nodiscard]] std::string join_names(const std::vector<std::string>& names)
+        {
+            std::string result;
+            for (const std::string& name : names)
+            {
+                if (!result.empty())
+                    result += ", ";
+                result += name;
+            }
+            return result;
+        }
+
+        [[nodiscard]] bool environment_flag_enabled(const char* name) noexcept
+        {
+#ifdef _MSC_VER
+            char* value = nullptr;
+            std::size_t value_size = 0;
+            if (_dupenv_s(&value, &value_size, name) != 0 || value == nullptr)
+                return false;
+            const bool enabled = value[0] != '\0'
+                && std::strcmp(value, "0") != 0
+                && std::strcmp(value, "false") != 0
+                && std::strcmp(value, "FALSE") != 0
+                && std::strcmp(value, "off") != 0
+                && std::strcmp(value, "OFF") != 0;
+            std::free(value);
+            return enabled;
+#else
+            const char* value = std::getenv(name);
+            if (value == nullptr || value[0] == '\0')
+                return false;
+            const bool enabled = std::strcmp(value, "0") != 0
+                && std::strcmp(value, "false") != 0
+                && std::strcmp(value, "FALSE") != 0
+                && std::strcmp(value, "off") != 0
+                && std::strcmp(value, "OFF") != 0;
+            return enabled;
+#endif
+        }
     } // namespace
 
     struct Renderer::Impl final
@@ -276,6 +556,7 @@ namespace rose::core::vulkan
         VkExtent2D m_scene_extent{};
 
         std::array<FrameSync, k_max_frames_in_flight> m_frames{};
+        std::array<ReadbackSlot, k_max_frames_in_flight> m_readback_slots{};
         std::vector<VkFence> m_images_in_flight;
         std::size_t m_current_frame = 0;
         uint32_t m_active_image_index = 0;
@@ -293,6 +574,7 @@ namespace rose::core::vulkan
         std::array<float, 16> m_frame_view_projection{};
         bool m_previous_view_projection_valid = false;
         bool m_frame_view_projection_set = false;
+        std::optional<CapturedFrame> m_completed_stream_frame;
 
         bool m_dlss_requested = false;
         DlssQuality m_dlss_quality = DlssQuality::Quality;
@@ -306,6 +588,8 @@ namespace rose::core::vulkan
         bool m_ngx_extensions_available = true;
 
 #ifdef ROSE_ENABLE_NGX_DLSS
+        bool m_ngx_init_attempted = false;
+        bool m_ngx_disabled_by_env = false;
         bool m_ngx_initialized = false;
         bool m_ngx_available = false;
         NVSDK_NGX_Parameter* m_ngx_parameters = nullptr;
@@ -315,13 +599,27 @@ namespace rose::core::vulkan
         Impl(GLFWwindow* window, const omath::Vector2<int>&)
             : m_window(window)
         {
+            spdlog::flush_on(spdlog::level::info);
+            spdlog::info("Vulkan: renderer initialization started");
             create_instance();
             create_surface();
             pick_physical_device();
             create_logical_device();
             create_command_pool();
             create_descriptor_pool();
-            init_dlss_sdk();
+#ifdef ROSE_ENABLE_NGX_DLSS
+            m_ngx_disabled_by_env = environment_flag_enabled("ROSE_DISABLE_NGX_DLSS");
+            if (m_ngx_disabled_by_env)
+            {
+                m_dlss_status = "DLSS disabled by ROSE_DISABLE_NGX_DLSS";
+                spdlog::info("Vulkan: {}", m_dlss_status);
+            }
+            else if (m_ngx_extensions_available)
+            {
+                m_dlss_status = "DLSS is off (enable to initialize)";
+                spdlog::info("Vulkan: {}", m_dlss_status);
+            }
+#endif
             create_swapchain();
             create_image_views();
             create_render_pass();
@@ -332,6 +630,7 @@ namespace rose::core::vulkan
             create_command_buffers();
             create_sync_objects();
             init_imgui();
+            spdlog::info("Vulkan: renderer initialization completed");
         }
 
         ~Impl()
@@ -385,6 +684,7 @@ namespace rose::core::vulkan
         {
             FrameSync& frame = m_frames[m_current_frame];
             check_vk(vkWaitForFences(m_device, 1, &frame.in_flight, VK_TRUE, UINT64_MAX), "Failed to wait for frame fence");
+            collect_completed_readback(m_current_frame);
 
             VkResult result = vkAcquireNextImageKHR(
                 m_device, m_swapchain, UINT64_MAX, frame.image_available, VK_NULL_HANDLE, &m_active_image_index);
@@ -558,22 +858,25 @@ namespace rose::core::vulkan
             ImGui_ImplVulkan_RenderDrawData(draw_data, m_active_command_buffer);
         }
 
-        [[nodiscard]] std::vector<std::byte> end_frame(bool capture_screenshot)
+        [[nodiscard]] std::optional<CapturedFrame> end_frame(bool capture_screenshot)
         {
             if (!m_frame_started)
-                return {};
+                return std::nullopt;
 
-            BufferResource readback_buffer;
+            std::optional<CapturedFrame> screenshot = std::move(m_completed_stream_frame);
+            m_completed_stream_frame.reset();
+
+            ReadbackSlot* readback_slot = nullptr;
             const bool can_capture = capture_screenshot && m_swapchain_supports_transfer_src;
             if (can_capture)
             {
                 const VkDeviceSize image_size = static_cast<VkDeviceSize>(m_swapchain_extent.width)
                                               * static_cast<VkDeviceSize>(m_swapchain_extent.height)
                                               * 4u;
-                create_buffer(image_size,
-                              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                              readback_buffer);
+                readback_slot = &m_readback_slots[m_current_frame];
+                ensure_readback_slot(*readback_slot, image_size);
+                readback_slot->extent = m_swapchain_extent;
+                readback_slot->format = m_swapchain_image_format;
             }
 
             finish_scene_rendering();
@@ -583,8 +886,8 @@ namespace rose::core::vulkan
                 m_present_render_pass_active = false;
             }
 
-            if (can_capture)
-                record_screenshot_copy(readback_buffer);
+            if (readback_slot != nullptr)
+                record_screenshot_copy(readback_slot->buffer);
 
             check_vk(vkEndCommandBuffer(m_active_command_buffer), "Failed to end command buffer");
 
@@ -603,14 +906,8 @@ namespace rose::core::vulkan
             submit_info.pSignalSemaphores = &frame.render_finished;
             check_vk(vkQueueSubmit(m_graphics_queue, 1, &submit_info, frame.in_flight), "Failed to submit draw command buffer");
 
-            std::vector<std::byte> screenshot;
-            if (can_capture)
-            {
-                check_vk(vkWaitForFences(m_device, 1, &frame.in_flight, VK_TRUE, UINT64_MAX),
-                         "Failed to wait for screenshot readback");
-                screenshot = encode_screenshot(readback_buffer);
-                destroy_buffer(readback_buffer);
-            }
+            if (readback_slot != nullptr)
+                readback_slot->pending = true;
 
             VkPresentInfoKHR present_info{};
             present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -654,7 +951,8 @@ namespace rose::core::vulkan
         [[nodiscard]] bool dlss_available() const
         {
 #ifdef ROSE_ENABLE_NGX_DLSS
-            return m_ngx_available;
+            return m_ngx_available
+                || (!m_ngx_init_attempted && !m_ngx_disabled_by_env && m_ngx_extensions_available);
 #else
             return false;
 #endif
@@ -707,22 +1005,51 @@ namespace rose::core::vulkan
             extent.height = optimal_height;
             m_dlss_sharpness = sharpness;
             if (!create_dlss_feature(extent))
+            {
+                m_dlss_requested = false;
                 extent = m_swapchain_extent;
+            }
 #endif
             return extent;
+        }
+
+        [[nodiscard]] bool ensure_dlss_sdk_initialized()
+        {
+#ifdef ROSE_ENABLE_NGX_DLSS
+            if (m_ngx_available)
+                return true;
+            if (m_ngx_disabled_by_env)
+            {
+                m_dlss_status = "DLSS disabled by ROSE_DISABLE_NGX_DLSS";
+                return false;
+            }
+            if (m_ngx_init_attempted)
+                return false;
+
+            m_ngx_init_attempted = true;
+            init_dlss_sdk();
+            return m_ngx_available;
+#else
+            m_dlss_status = "DLSS support was not compiled";
+            return false;
+#endif
         }
 
         void init_dlss_sdk()
         {
 #ifdef ROSE_ENABLE_NGX_DLSS
             if (!m_ngx_extensions_available)
+            {
+                spdlog::warn("Vulkan: skipping NGX init because required extensions are unavailable");
                 return;
+            }
 
             std::error_code error;
             const std::filesystem::path log_path = std::filesystem::current_path(error) / "ngx";
             if (!error)
                 std::filesystem::create_directories(log_path, error);
             const std::wstring log_path_w = log_path.wstring();
+            spdlog::info("Vulkan: initializing NVIDIA NGX/DLSS");
 
             NVSDK_NGX_FeatureCommonInfo feature_info{};
             feature_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
@@ -740,6 +1067,7 @@ namespace rose::core::vulkan
             if (NVSDK_NGX_FAILED(init_result))
             {
                 m_dlss_status = std::string("NGX init failed: ") + ngx_result_name(init_result);
+                spdlog::warn("Vulkan: {}", m_dlss_status);
                 return;
             }
             m_ngx_initialized = true;
@@ -748,6 +1076,7 @@ namespace rose::core::vulkan
             if (NVSDK_NGX_FAILED(params_result) || m_ngx_parameters == nullptr)
             {
                 m_dlss_status = std::string("NGX capability query failed: ") + ngx_result_name(params_result);
+                spdlog::warn("Vulkan: {}", m_dlss_status);
                 return;
             }
 
@@ -757,11 +1086,13 @@ namespace rose::core::vulkan
             if (NVSDK_NGX_FAILED(available_result) || available == 0)
             {
                 m_dlss_status = "DLSS is not available on this system";
+                spdlog::warn("Vulkan: {}", m_dlss_status);
                 return;
             }
 
             m_ngx_available = true;
             m_dlss_status = "DLSS is available";
+            spdlog::info("Vulkan: {}", m_dlss_status);
 #else
             m_dlss_status = "DLSS support was not compiled";
 #endif
@@ -807,6 +1138,7 @@ namespace rose::core::vulkan
             {
                 m_ngx_dlss_handle = nullptr;
                 m_dlss_status = std::string("DLSS feature creation failed: ") + ngx_result_name(result);
+                spdlog::warn("Vulkan: {}", m_dlss_status);
                 return false;
             }
 
@@ -815,6 +1147,7 @@ namespace rose::core::vulkan
                           + " (" + std::to_string(render_extent.width) + "x" + std::to_string(render_extent.height)
                           + " -> " + std::to_string(m_swapchain_extent.width) + "x" + std::to_string(m_swapchain_extent.height)
                           + ")";
+            spdlog::info("Vulkan: {}", m_dlss_status);
             return true;
 #else
             static_cast<void>(render_extent);
@@ -868,6 +1201,7 @@ namespace rose::core::vulkan
             if (m_frame_started)
                 return;
 
+            spdlog::info("Vulkan: recreating frame targets");
             check_vk(vkDeviceWaitIdle(m_device), "Failed to wait for device before recreating render targets");
             destroy_frame_targets();
             create_render_targets();
@@ -876,6 +1210,15 @@ namespace rose::core::vulkan
 
         void set_dlss_enabled(bool enabled)
         {
+            spdlog::info("Vulkan: DLSS {}", enabled ? "enable requested" : "disable requested");
+            if (enabled && !ensure_dlss_sdk_initialized())
+            {
+                m_dlss_requested = false;
+                m_dlss_reset_next_frame = true;
+                spdlog::warn("Vulkan: DLSS enable failed: {}", m_dlss_status);
+                return;
+            }
+
             if (m_dlss_requested == enabled)
                 return;
 
@@ -928,6 +1271,9 @@ namespace rose::core::vulkan
             for (uint32_t i = 0; i < glfw_extension_count; ++i)
                 extension_names.emplace_back(glfw_extensions[i]);
             append_available_instance_extensions(extension_names);
+            spdlog::info("Vulkan: creating instance api={} extensions=[{}]",
+                         vulkan_version_string(k_api_version),
+                         join_names(extension_names));
 
             std::vector<const char*> extension_ptrs;
             extension_ptrs.reserve(extension_names.size());
@@ -942,11 +1288,13 @@ namespace rose::core::vulkan
             create_info.enabledLayerCount = 0;
 
             check_vk(vkCreateInstance(&create_info, nullptr, &m_instance), "Failed to create Vulkan instance");
+            spdlog::info("Vulkan: instance created");
         }
 
         void create_surface()
         {
             check_vk(glfwCreateWindowSurface(m_instance, m_window, nullptr, &m_surface), "Failed to create Vulkan surface");
+            spdlog::info("Vulkan: GLFW surface created");
         }
 
         void load_ngx_required_extensions()
@@ -962,6 +1310,7 @@ namespace rose::core::vulkan
             {
                 m_ngx_extensions_available = false;
                 m_dlss_status = std::string("NGX extension query failed: ") + ngx_result_name(result);
+                spdlog::warn("Vulkan: {}", m_dlss_status);
                 return;
             }
 
@@ -971,6 +1320,9 @@ namespace rose::core::vulkan
                 m_ngx_instance_extensions.emplace_back(instance_extensions[i]);
             for (unsigned int i = 0; i < device_count; ++i)
                 m_ngx_device_extensions.emplace_back(device_extensions[i]);
+            spdlog::info("Vulkan: NGX requested {} instance extension(s), {} device extension(s)",
+                         instance_count,
+                         device_count);
 #endif
         }
 
@@ -1001,6 +1353,7 @@ namespace rose::core::vulkan
                 {
                     m_ngx_extensions_available = false;
                     m_dlss_status = "Missing Vulkan instance extension for DLSS: " + extension;
+                    spdlog::warn("Vulkan: {}", m_dlss_status);
                 }
             }
         }
@@ -1032,6 +1385,7 @@ namespace rose::core::vulkan
                 {
                     m_ngx_extensions_available = false;
                     m_dlss_status = "Missing Vulkan device extension for DLSS: " + extension;
+                    spdlog::warn("Vulkan: {}", m_dlss_status);
                 }
             }
         }
@@ -1124,28 +1478,46 @@ namespace rose::core::vulkan
             check_vk(vkEnumeratePhysicalDevices(m_instance, &device_count, nullptr), "Failed to enumerate Vulkan devices");
             if (device_count == 0)
                 throw VulkanError("No Vulkan-capable GPU found");
+            spdlog::info("Vulkan: found {} physical device(s)", device_count);
 
             std::vector<VkPhysicalDevice> devices(device_count);
             check_vk(vkEnumeratePhysicalDevices(m_instance, &device_count, devices.data()), "Failed to enumerate Vulkan devices");
 
+            std::optional<VkPhysicalDevice> fallback_device;
             for (VkPhysicalDevice device : devices)
             {
                 VkPhysicalDeviceProperties properties{};
                 vkGetPhysicalDeviceProperties(device, &properties);
-                if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU && is_device_suitable(device))
+                const bool suitable = is_device_suitable(device);
+                spdlog::info("Vulkan: GPU candidate '{}' type={} api={} driver={} vendor=0x{:04x} device=0x{:04x} suitable={}",
+                             properties.deviceName,
+                             physical_device_type_name(properties.deviceType),
+                             vulkan_version_string(properties.apiVersion),
+                             properties.driverVersion,
+                             properties.vendorID,
+                             properties.deviceID,
+                             suitable);
+                if (!suitable)
+                    continue;
+
+                if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
                 {
                     m_physical_device = device;
+                    spdlog::info("Vulkan: selected GPU '{}'", properties.deviceName);
                     return;
                 }
+
+                if (!fallback_device)
+                    fallback_device = device;
             }
 
-            for (VkPhysicalDevice device : devices)
+            if (fallback_device)
             {
-                if (is_device_suitable(device))
-                {
-                    m_physical_device = device;
-                    return;
-                }
+                VkPhysicalDeviceProperties properties{};
+                vkGetPhysicalDeviceProperties(*fallback_device, &properties);
+                m_physical_device = *fallback_device;
+                spdlog::info("Vulkan: selected GPU '{}'", properties.deviceName);
+                return;
             }
 
             throw VulkanError("No suitable Vulkan device found");
@@ -1177,6 +1549,10 @@ namespace rose::core::vulkan
             extension_ptrs.reserve(extension_names.size());
             for (const std::string& extension : extension_names)
                 extension_ptrs.push_back(extension.c_str());
+            spdlog::info("Vulkan: creating logical device graphics_queue={} present_queue={} extensions=[{}]",
+                         m_graphics_queue_family,
+                         m_present_queue_family,
+                         join_names(extension_names));
 
             VkPhysicalDeviceFeatures device_features{};
             VkDeviceCreateInfo create_info{};
@@ -1190,6 +1566,7 @@ namespace rose::core::vulkan
             check_vk(vkCreateDevice(m_physical_device, &create_info, nullptr, &m_device), "Failed to create Vulkan device");
             vkGetDeviceQueue(m_device, m_graphics_queue_family, 0, &m_graphics_queue);
             vkGetDeviceQueue(m_device, m_present_queue_family, 0, &m_present_queue);
+            spdlog::info("Vulkan: logical device created");
         }
 
         [[nodiscard]] VkSurfaceFormatKHR choose_surface_format(const std::vector<VkSurfaceFormatKHR>& formats) const
@@ -1305,6 +1682,15 @@ namespace rose::core::vulkan
             m_swapchain_image_format = surface_format.format;
             m_swapchain_extent = extent;
             m_images_in_flight.assign(m_swapchain_images.size(), VK_NULL_HANDLE);
+            spdlog::info("Vulkan: swapchain created {}x{} images={} format={} color_space={} present_mode={} transfer_src={} transfer_dst={}",
+                         m_swapchain_extent.width,
+                         m_swapchain_extent.height,
+                         m_swapchain_images.size(),
+                         vk_format_name(m_swapchain_image_format),
+                         static_cast<int>(surface_format.colorSpace),
+                         present_mode_name(present_mode),
+                         m_swapchain_supports_transfer_src,
+                         m_swapchain_supports_transfer_dst);
         }
 
         [[nodiscard]] VkImageView create_image_view(VkImage image, VkFormat format, VkImageAspectFlags aspect_flags) const
@@ -1456,6 +1842,11 @@ namespace rose::core::vulkan
 
             check_vk(vkCreateRenderPass(m_device, &present_render_pass_info, nullptr, &m_present_render_pass),
                      "Failed to create present render pass");
+            spdlog::info("Vulkan: render passes created scene_color={} motion={} depth={} present={}",
+                         vk_format_name(m_scene_color_format),
+                         vk_format_name(m_motion_vector_format),
+                         vk_format_name(m_depth_format),
+                         vk_format_name(m_swapchain_image_format));
         }
 
         [[nodiscard]] VkShaderModule create_shader_module(const std::vector<char>& code) const
@@ -1485,12 +1876,18 @@ namespace rose::core::vulkan
             layout_info.pBindings = &sampler_layout_binding;
             check_vk(vkCreateDescriptorSetLayout(m_device, &layout_info, nullptr, &m_descriptor_set_layout),
                      "Failed to create descriptor set layout");
+            spdlog::info("Vulkan: descriptor set layout created");
         }
 
         void create_graphics_pipeline()
         {
-            const std::vector<char> vert_shader_code = read_binary_file(shader_path("shader.vert.spv"));
-            const std::vector<char> frag_shader_code = read_binary_file(shader_path("shader.frag.spv"));
+            const std::filesystem::path vert_shader_path = shader_path("shader.vert.spv");
+            const std::filesystem::path frag_shader_path = shader_path("shader.frag.spv");
+            spdlog::info("Vulkan: creating graphics pipelines using shaders '{}' and '{}'",
+                         vert_shader_path.string(),
+                         frag_shader_path.string());
+            const std::vector<char> vert_shader_code = read_binary_file(vert_shader_path);
+            const std::vector<char> frag_shader_code = read_binary_file(frag_shader_path);
             const VkShaderModule vert_shader_module = create_shader_module(vert_shader_code);
             const VkShaderModule frag_shader_module = create_shader_module(frag_shader_code);
 
@@ -1654,6 +2051,7 @@ namespace rose::core::vulkan
 
             check_vk(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_outline_pipeline),
                      "Failed to create outline pipeline");
+            spdlog::info("Vulkan: graphics pipelines created");
 
             vkDestroyShaderModule(m_device, frag_shader_module, nullptr);
             vkDestroyShaderModule(m_device, vert_shader_module, nullptr);
@@ -1687,6 +2085,12 @@ namespace rose::core::vulkan
         void create_render_targets()
         {
             m_scene_extent = choose_scene_extent();
+            spdlog::info("Vulkan: creating render targets scene={}x{} swapchain={}x{} dlss_active={}",
+                         m_scene_extent.width,
+                         m_scene_extent.height,
+                         m_swapchain_extent.width,
+                         m_swapchain_extent.height,
+                         dlss_active());
 
             create_image(m_scene_extent.width,
                          m_scene_extent.height,
@@ -1739,6 +2143,7 @@ namespace rose::core::vulkan
                                                              m_scene_color_format,
                                                              VK_IMAGE_ASPECT_COLOR_BIT);
             }
+            spdlog::info("Vulkan: render targets created");
         }
 
         void create_framebuffers()
@@ -2329,6 +2734,7 @@ namespace rose::core::vulkan
             {
                 m_dlss_status = std::string("DLSS evaluate failed: ") + ngx_result_name(result);
                 m_dlss_reset_next_frame = true;
+                m_dlss_requested = false;
                 return false;
             }
 
@@ -2610,6 +3016,38 @@ namespace rose::core::vulkan
             }
         }
 
+        void destroy_readback_slots() noexcept
+        {
+            for (ReadbackSlot& slot : m_readback_slots)
+            {
+                destroy_buffer(slot.buffer);
+                slot = {};
+            }
+            m_completed_stream_frame.reset();
+        }
+
+        void ensure_readback_slot(ReadbackSlot& slot, VkDeviceSize size)
+        {
+            if (slot.buffer.buffer != VK_NULL_HANDLE && slot.buffer.size == size)
+                return;
+
+            destroy_buffer(slot.buffer);
+            create_buffer(size,
+                          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          slot.buffer);
+        }
+
+        void collect_completed_readback(std::size_t frame_index)
+        {
+            ReadbackSlot& slot = m_readback_slots[frame_index];
+            if (!slot.pending)
+                return;
+
+            m_completed_stream_frame = readback_frame(slot.buffer, slot.extent, slot.format);
+            slot.pending = false;
+        }
+
         void record_screenshot_copy(const BufferResource& readback_buffer) const
         {
             VkImageMemoryBarrier to_transfer{};
@@ -2674,54 +3112,23 @@ namespace rose::core::vulkan
                                  &to_present);
         }
 
-        [[nodiscard]] std::vector<std::byte> encode_screenshot(const BufferResource& readback_buffer) const
+        [[nodiscard]] CapturedFrame readback_frame(const BufferResource& readback_buffer,
+                                                   VkExtent2D extent,
+                                                   VkFormat format) const
         {
             void* mapped = nullptr;
             check_vk(vkMapMemory(m_device, readback_buffer.memory, 0, readback_buffer.size, 0, &mapped),
                      "Failed to map screenshot buffer");
 
-            const auto* source = static_cast<const unsigned char*>(mapped);
-            std::vector<unsigned char> rgba(static_cast<std::size_t>(m_swapchain_extent.width)
-                                           * static_cast<std::size_t>(m_swapchain_extent.height)
-                                           * 4u);
+            CapturedFrame frame;
+            frame.width = extent.width;
+            frame.height = extent.height;
+            frame.format = is_bgra_format(format) ? CapturedFrameFormat::Bgra : CapturedFrameFormat::Rgba;
+            frame.pixels.resize(static_cast<std::size_t>(extent.width) * static_cast<std::size_t>(extent.height) * 4u);
+            std::memcpy(frame.pixels.data(), mapped, frame.pixels.size());
 
-            for (uint32_t y = 0; y < m_swapchain_extent.height; ++y)
-            {
-                for (uint32_t x = 0; x < m_swapchain_extent.width; ++x)
-                {
-                    const std::size_t index = (static_cast<std::size_t>(y) * m_swapchain_extent.width + x) * 4u;
-                    if (is_bgra_format(m_swapchain_image_format))
-                    {
-                        rgba[index] = source[index + 2u];
-                        rgba[index + 1u] = source[index + 1u];
-                        rgba[index + 2u] = source[index];
-                        rgba[index + 3u] = source[index + 3u];
-                    }
-                    else
-                    {
-                        rgba[index] = source[index];
-                        rgba[index + 1u] = source[index + 1u];
-                        rgba[index + 2u] = source[index + 2u];
-                        rgba[index + 3u] = source[index + 3u];
-                    }
-                }
-            }
             vkUnmapMemory(m_device, readback_buffer.memory);
-
-            std::vector<std::byte> bmp;
-            stbi_write_bmp_to_func(
-                [](void* context, void* data, int size)
-                {
-                    auto* output = static_cast<std::vector<std::byte>*>(context);
-                    const auto* bytes = static_cast<std::byte*>(data);
-                    output->insert(output->end(), bytes, bytes + size);
-                },
-                &bmp,
-                static_cast<int>(m_swapchain_extent.width),
-                static_cast<int>(m_swapchain_extent.height),
-                4,
-                rgba.data());
-            return bmp;
+            return frame;
         }
 
         void cleanup_swapchain() noexcept
@@ -2736,6 +3143,7 @@ namespace rose::core::vulkan
             }
 
             destroy_frame_targets();
+            destroy_readback_slots();
 
             for (VkImageView image_view : m_swapchain_image_views)
                 vkDestroyImageView(m_device, image_view, nullptr);
@@ -2759,6 +3167,7 @@ namespace rose::core::vulkan
                 glfwGetFramebufferSize(m_window, &width, &height);
             }
 
+            spdlog::info("Vulkan: recreating swapchain");
             check_vk(vkDeviceWaitIdle(m_device), "Failed to wait for device before swapchain recreation");
             const VkFormat old_format = m_swapchain_image_format;
             cleanup_swapchain();
@@ -2799,7 +3208,7 @@ namespace rose::core::vulkan
         m_impl->render_imgui(draw_data);
     }
 
-    std::vector<std::byte> Renderer::end_frame(bool capture_screenshot)
+    std::optional<CapturedFrame> Renderer::end_frame(bool capture_screenshot)
     {
         return m_impl->end_frame(capture_screenshot);
     }

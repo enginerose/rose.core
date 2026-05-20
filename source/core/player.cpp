@@ -2,6 +2,7 @@
 // Created by orange on 26.02.2026.
 //
 #include "rose/core/player.hpp"
+#include <algorithm>
 #include <cmath>
 #include <omath/3d_primitives/mesh.hpp>
 #include <omath/collision/epa_algorithm.hpp>
@@ -83,6 +84,10 @@ namespace rose::core
             m_velocity = {};
             m_jump_buffer_timer = 0.f;
             m_ground_grace_timer = 0.f;
+            m_jump_ground_lockout_timer = 0.f;
+            m_wall_run_cooldown_timer = 0.f;
+            m_has_wall_contact = false;
+            m_is_wall_running = false;
         }
         m_noclip_was_pressed = input.noclip;
 
@@ -151,12 +156,28 @@ namespace rose::core
 
         const bool jump_pressed = input.jump;
         const bool jump_started = jump_pressed && !m_jump_was_pressed;
+        const bool jump_released = !jump_pressed && m_jump_was_pressed;
+        const bool was_wall_running = m_is_wall_running;
         m_jump_was_pressed = jump_pressed;
 
+        if (m_jump_ground_lockout_timer > 0.f)
+            m_jump_ground_lockout_timer = (m_jump_ground_lockout_timer > dt)
+                ? (m_jump_ground_lockout_timer - dt)
+                : 0.f;
+        if (m_wall_run_cooldown_timer > 0.f)
+            m_wall_run_cooldown_timer = (m_wall_run_cooldown_timer > dt)
+                ? (m_wall_run_cooldown_timer - dt)
+                : 0.f;
+
         if (m_is_grounded)
+        {
             m_ground_grace_timer = k_ground_grace_time;
+            m_wall_run_cooldown_timer = 0.f;
+        }
         else if (m_ground_grace_timer > 0.f)
+        {
             m_ground_grace_timer = (m_ground_grace_timer > dt) ? (m_ground_grace_timer - dt) : 0.f;
+        }
 
         if (jump_started || (input.auto_bhop && jump_pressed))
             m_jump_buffer_timer = k_jump_buffer_time;
@@ -177,6 +198,7 @@ namespace rose::core
             m_is_grounded = false;
             m_jump_buffer_timer = 0.f;
             m_ground_grace_timer = 0.f;
+            m_jump_ground_lockout_timer = k_jump_ground_lockout_time;
         }
         else if (m_is_grounded)
         {
@@ -186,11 +208,48 @@ namespace rose::core
         if (m_is_grounded)
         {
             accelerate(wish_dir, wish_speed, k_ground_accel, dt);
+            m_is_wall_running = false;
         }
         else
         {
             air_accelerate(wish_dir, wish_speed, k_air_accel, dt);
-            m_velocity.y += k_gravity * 0.5f * dt;
+
+            bool wall_running = false;
+            const bool can_wall_jump =
+                    input.wallrun
+                    && was_wall_running
+                    && m_has_wall_contact
+                    && m_wall_run_cooldown_timer <= 0.f
+                    && std::abs(m_wall_contact_normal.y) <= k_wall_run_max_up_dot;
+            const bool can_snap_to_wall = input.wallrun && jump_pressed && can_wall_run(wish_dir, wish_speed);
+            if (can_wall_jump || can_snap_to_wall)
+            {
+                const auto tangent = wall_run_tangent(wish_dir);
+                const float tangent_speed =
+                        m_velocity.x * tangent.x +
+                        m_velocity.z * tangent.z;
+                const float run_speed = std::max(tangent_speed, k_wall_run_speed);
+
+                if (jump_released && can_wall_jump)
+                {
+                    m_velocity.x = tangent.x * run_speed + m_wall_contact_normal.x * k_wall_jump_push_speed;
+                    m_velocity.y = k_wall_jump_up_speed;
+                    m_velocity.z = tangent.z * run_speed + m_wall_contact_normal.z * k_wall_jump_push_speed;
+                    m_jump_buffer_timer = 0.f;
+                    m_wall_run_cooldown_timer = k_wall_run_regrab_cooldown;
+                }
+                else if (jump_pressed)
+                {
+                    m_velocity.x = tangent.x * run_speed - m_wall_contact_normal.x * k_wall_run_stick_speed;
+                    m_velocity.z = tangent.z * run_speed - m_wall_contact_normal.z * k_wall_run_stick_speed;
+                    if (m_velocity.y < k_wall_run_max_fall_speed)
+                        m_velocity.y = k_wall_run_max_fall_speed;
+                    wall_running = true;
+                }
+            }
+
+            const float gravity_scale = wall_running ? k_wall_run_gravity_scale : 1.f;
+            m_velocity.y += k_gravity * gravity_scale * 0.5f * dt;
         }
 
         // --- Integrate position ---
@@ -201,13 +260,16 @@ namespace rose::core
 
         // --- Collision resolution (multiple passes to handle simultaneous contacts) ---
         m_is_grounded = false;
+        m_has_wall_contact = false;
         m_collider.set_origin(position);
 
         for (int i = 0; i < 5; i++)
             resolve_collisions(world);
 
+        const bool post_wall_running = input.wallrun && jump_pressed && can_wall_run(wish_dir, wish_speed);
+        m_is_wall_running = post_wall_running;
         if (!m_is_grounded)
-            m_velocity.y += k_gravity * 0.5f * dt;
+            m_velocity.y += k_gravity * (post_wall_running ? k_wall_run_gravity_scale : 1.f) * 0.5f * dt;
         else if (m_velocity.y < 0.f)
             m_velocity.y = 0.f;
     }
@@ -289,6 +351,49 @@ namespace rose::core
         m_velocity.z -= normal.z * backoff;
     }
 
+    bool Player::can_wall_run(const omath::Vector3<float>& wish_dir, float wish_speed) const
+    {
+        if (!m_has_wall_contact
+            || wish_speed <= 0.f
+            || m_wall_run_cooldown_timer > 0.f
+            || std::abs(m_wall_contact_normal.y) > k_wall_run_max_up_dot)
+        {
+            return false;
+        }
+
+        const float away_input =
+                wish_dir.x * m_wall_contact_normal.x +
+                wish_dir.z * m_wall_contact_normal.z;
+        return away_input < k_wall_run_max_away_input_dot;
+    }
+
+    omath::Vector3<float> Player::wall_run_tangent(const omath::Vector3<float>& wish_dir) const
+    {
+        omath::Vector3<float> tangent{
+            m_wall_contact_normal.z,
+            0.f,
+            -m_wall_contact_normal.x
+        };
+
+        const float len_sq = tangent.x * tangent.x + tangent.z * tangent.z;
+        if (len_sq > 1e-6f)
+        {
+            const float inv_len = 1.f / std::sqrt(len_sq);
+            tangent.x *= inv_len;
+            tangent.z *= inv_len;
+        }
+
+        const float wish_dot = tangent.x * wish_dir.x + tangent.z * wish_dir.z;
+        const float velocity_dot = tangent.x * m_velocity.x + tangent.z * m_velocity.z;
+        if ((std::abs(wish_dot) > 0.01f ? wish_dot : velocity_dot) < 0.f)
+        {
+            tangent.x = -tangent.x;
+            tangent.z = -tangent.z;
+        }
+
+        return tangent;
+    }
+
     void Player::resolve_collisions(const CollisionWorld& world)
     {
         const auto pos = m_collider.get_origin();
@@ -331,18 +436,24 @@ namespace rose::core
 
             const float up_dot = normal.y;
 
-            if (up_dot > k_floor_dot)
+            if (up_dot > m_floor_dot)
             {
-                if (m_velocity.y <= 0.f)
+                if (m_jump_ground_lockout_timer <= 0.f)
                 {
                     m_is_grounded = true;
-                    m_velocity.y = 0.f;
+                    if (m_velocity.y < 0.f)
+                        m_velocity.y = 0.f;
                 }
             }
-            else if (up_dot < -k_floor_dot)
+            else if (up_dot < -m_floor_dot)
             {
                 if (m_velocity.y > 0.f)
                     m_velocity.y = 0.f;
+            }
+            else if (std::abs(up_dot) <= k_wall_run_max_up_dot)
+            {
+                m_has_wall_contact = true;
+                m_wall_contact_normal = normal;
             }
         }
     }
@@ -351,6 +462,16 @@ namespace rose::core
     {
         const auto position = m_collider.get_origin();
         return {position.x, position.y + k_eye_height, position.z};
+    }
+
+    void Player::set_floor_dot(float floor_dot)
+    {
+        if (floor_dot < 0.f)
+            floor_dot = 0.f;
+        else if (floor_dot > 1.f)
+            floor_dot = 1.f;
+
+        m_floor_dot = floor_dot;
     }
 
     const omath::opengl_engine::ViewAngles& Player::get_view_angles() const
