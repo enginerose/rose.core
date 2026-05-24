@@ -5,6 +5,7 @@
 #include "rose/core/vulkan/mesh.hpp"
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <omath/engines/opengl_engine/camera.hpp>
 #include <omath/linear_algebra/vector2.hpp>
@@ -32,6 +33,15 @@ namespace rose::core::vulkan
         std::array<float, 3> color{0.02f, 0.72f, 1.0f};
         float width = 0.18f;
         int smoothing_quality = 3;
+    };
+
+    struct BloomSettings final
+    {
+        bool enabled = false;
+        float threshold = 1.0f;
+        float intensity = 0.35f;
+        float radius = 2.0f;
+        int quality = 8;
     };
 
     enum class CapturedFrameFormat
@@ -73,6 +83,8 @@ namespace rose::core::vulkan
         [[nodiscard]] std::string dlss_status() const;
         [[nodiscard]] SelectionOutlineSettings selection_outline_settings() const;
         void set_selection_outline_settings(const SelectionOutlineSettings& settings);
+        [[nodiscard]] BloomSettings bloom_settings() const;
+        void set_bloom_settings(const BloomSettings& settings);
 
     private:
         struct Impl;

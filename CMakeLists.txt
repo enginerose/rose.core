@@ -85,6 +85,8 @@ file(MAKE_DIRECTORY "${ROSE_SHADER_OUTPUT_DIR}")
 set(ROSE_SHADER_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shader.vert"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shader.frag"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/post.vert"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/bloom.frag"
 )
 
 set(ROSE_SHADER_OUTPUTS)

@@ -405,86 +405,130 @@ namespace rose::core
                             1000.0 / ImGui::GetIO().Framerate,
                             ImGui::GetIO().Framerate);
                 ImGui::Separator();
-                ImGui::Checkbox("FPS cap", &fps_cap_enabled);
-                ImGui::BeginDisabled(!fps_cap_enabled);
-                ImGui::SliderInt("FPS limit", &fps_limit, 30, 360);
-                ImGui::EndDisabled();
-                ImGui::Checkbox("Auto bhop", &auto_bhop);
-                ImGui::Checkbox("Wallrun", &wallrun_enabled);
-                if (ImGui::SliderFloat("Ground max slope", &ground_max_slope_degrees, 0.0f, 89.0f, "%.1f deg"))
+                if (ImGui::BeginTabBar("ROSE Overlay Tabs"))
                 {
-                    player.set_floor_dot(std::cos(ground_max_slope_degrees * radians_per_degree));
+                    if (ImGui::BeginTabItem("General"))
+                    {
+                        ImGui::Checkbox("FPS cap", &fps_cap_enabled);
+                        ImGui::BeginDisabled(!fps_cap_enabled);
+                        ImGui::SliderInt("FPS limit", &fps_limit, 30, 360);
+                        ImGui::EndDisabled();
+                        ImGui::Checkbox("Auto bhop", &auto_bhop);
+                        ImGui::Checkbox("Wallrun", &wallrun_enabled);
+                        if (ImGui::SliderFloat("Ground max slope", &ground_max_slope_degrees, 0.0f, 89.0f, "%.1f deg"))
+                        {
+                            player.set_floor_dot(std::cos(ground_max_slope_degrees * radians_per_degree));
+                        }
+                        ImGui::EndTabItem();
+                    }
+
+                    if (ImGui::BeginTabItem("Rendering"))
+                    {
+                        auto bloom_settings = m_renderer->bloom_settings();
+                        bool bloom_settings_changed = false;
+                        bloom_settings_changed |= ImGui::Checkbox("Bloom", &bloom_settings.enabled);
+                        ImGui::BeginDisabled(!bloom_settings.enabled);
+                        bloom_settings_changed |= ImGui::SliderFloat("Bloom threshold",
+                                                                     &bloom_settings.threshold,
+                                                                     0.0f,
+                                                                     4.0f,
+                                                                     "%.2f");
+                        bloom_settings_changed |= ImGui::SliderFloat("Bloom intensity",
+                                                                     &bloom_settings.intensity,
+                                                                     0.0f,
+                                                                     3.0f,
+                                                                     "%.2f");
+                        bloom_settings_changed |= ImGui::SliderFloat("Bloom radius",
+                                                                     &bloom_settings.radius,
+                                                                     0.0f,
+                                                                     16.0f,
+                                                                     "%.1f px");
+                        bloom_settings_changed |= ImGui::SliderInt("Bloom quality",
+                                                                   &bloom_settings.quality,
+                                                                   1,
+                                                                   64);
+                        ImGui::EndDisabled();
+                        if (bloom_settings_changed)
+                            m_renderer->set_bloom_settings(bloom_settings);
+
+                        ImGui::Separator();
+                        bool dlss_enabled = m_renderer->dlss_enabled();
+                        ImGui::BeginDisabled(!m_renderer->dlss_available());
+                        if (ImGui::Checkbox("DLSS", &dlss_enabled))
+                            m_renderer->set_dlss_enabled(dlss_enabled);
+
+                        constexpr const char* dlss_quality_labels[] = {
+                            "Quality",
+                            "Balanced",
+                            "Performance",
+                            "Ultra Performance",
+                            "Ultra Quality",
+                            "DLAA"
+                        };
+                        int dlss_quality = static_cast<int>(m_renderer->dlss_quality());
+                        if (ImGui::Combo("DLSS mode",
+                                         &dlss_quality,
+                                         dlss_quality_labels,
+                                         static_cast<int>(std::size(dlss_quality_labels))))
+                            m_renderer->set_dlss_quality(static_cast<vulkan::DlssQuality>(dlss_quality));
+                        ImGui::EndDisabled();
+                        ImGui::TextWrapped("%s", m_renderer->dlss_status().c_str());
+                        ImGui::EndTabItem();
+                    }
+
+                    if (ImGui::BeginTabItem("Selection"))
+                    {
+                        if (selected_mesh)
+                            ImGui::Text("Selected mesh: %zu", *selected_mesh);
+                        else
+                            ImGui::TextUnformatted("Selected mesh: none");
+                        ImGui::BeginDisabled(!selected_mesh);
+                        if (ImGui::RadioButton("Move", gizmo_operation == ImGuizmo::TRANSLATE))
+                            gizmo_operation = ImGuizmo::TRANSLATE;
+                        ImGui::SameLine();
+                        if (ImGui::RadioButton("Rotate", gizmo_operation == ImGuizmo::ROTATE))
+                            gizmo_operation = ImGuizmo::ROTATE;
+                        ImGui::SameLine();
+                        if (ImGui::RadioButton("Scale", gizmo_operation == ImGuizmo::SCALE))
+                            gizmo_operation = ImGuizmo::SCALE;
+
+                        if (ImGui::RadioButton("World", gizmo_mode == ImGuizmo::WORLD))
+                            gizmo_mode = ImGuizmo::WORLD;
+                        ImGui::SameLine();
+                        if (ImGui::RadioButton("Local", gizmo_mode == ImGuizmo::LOCAL))
+                            gizmo_mode = ImGuizmo::LOCAL;
+
+                        ImGui::Checkbox("Snap", &gizmo_snap_enabled);
+                        ImGui::BeginDisabled(!gizmo_snap_enabled);
+                        if (gizmo_operation == ImGuizmo::ROTATE)
+                            ImGui::SliderFloat("Rotate snap", &gizmo_rotate_snap, 1.0f, 90.0f, "%.1f deg");
+                        else if (gizmo_operation == ImGuizmo::SCALE)
+                            ImGui::SliderFloat("Scale snap", &gizmo_scale_snap, 0.01f, 1.0f, "%.2f");
+                        else
+                            ImGui::SliderFloat("Move snap", &gizmo_translate_snap, 0.01f, 10.0f, "%.2f m");
+                        ImGui::EndDisabled();
+                        ImGui::EndDisabled();
+
+                        ImGui::Separator();
+                        auto outline_settings = m_renderer->selection_outline_settings();
+                        bool outline_settings_changed = false;
+                        outline_settings_changed |= ImGui::ColorEdit3("Glow color", outline_settings.color.data());
+                        outline_settings_changed |= ImGui::SliderFloat("Outline width",
+                                                                       &outline_settings.width,
+                                                                       0.01f,
+                                                                       0.5f,
+                                                                       "%.3f");
+                        outline_settings_changed |= ImGui::SliderInt("Smoothing quality",
+                                                                     &outline_settings.smoothing_quality,
+                                                                     1,
+                                                                     64);
+                        if (outline_settings_changed)
+                            m_renderer->set_selection_outline_settings(outline_settings);
+                        ImGui::EndTabItem();
+                    }
+
+                    ImGui::EndTabBar();
                 }
-                ImGui::Separator();
-
-                bool dlss_enabled = m_renderer->dlss_enabled();
-                ImGui::BeginDisabled(!m_renderer->dlss_available());
-                if (ImGui::Checkbox("DLSS", &dlss_enabled))
-                    m_renderer->set_dlss_enabled(dlss_enabled);
-
-                constexpr const char* dlss_quality_labels[] = {
-                    "Quality",
-                    "Balanced",
-                    "Performance",
-                    "Ultra Performance",
-                    "Ultra Quality",
-                    "DLAA"
-                };
-                int dlss_quality = static_cast<int>(m_renderer->dlss_quality());
-                if (ImGui::Combo("DLSS mode",
-                                 &dlss_quality,
-                                 dlss_quality_labels,
-                                 static_cast<int>(std::size(dlss_quality_labels))))
-                    m_renderer->set_dlss_quality(static_cast<vulkan::DlssQuality>(dlss_quality));
-                ImGui::EndDisabled();
-                ImGui::TextWrapped("%s", m_renderer->dlss_status().c_str());
-                ImGui::Separator();
-                if (selected_mesh)
-                    ImGui::Text("Selected mesh: %zu", *selected_mesh);
-                else
-                    ImGui::TextUnformatted("Selected mesh: none");
-                ImGui::BeginDisabled(!selected_mesh);
-                if (ImGui::RadioButton("Move", gizmo_operation == ImGuizmo::TRANSLATE))
-                    gizmo_operation = ImGuizmo::TRANSLATE;
-                ImGui::SameLine();
-                if (ImGui::RadioButton("Rotate", gizmo_operation == ImGuizmo::ROTATE))
-                    gizmo_operation = ImGuizmo::ROTATE;
-                ImGui::SameLine();
-                if (ImGui::RadioButton("Scale", gizmo_operation == ImGuizmo::SCALE))
-                    gizmo_operation = ImGuizmo::SCALE;
-
-                if (ImGui::RadioButton("World", gizmo_mode == ImGuizmo::WORLD))
-                    gizmo_mode = ImGuizmo::WORLD;
-                ImGui::SameLine();
-                if (ImGui::RadioButton("Local", gizmo_mode == ImGuizmo::LOCAL))
-                    gizmo_mode = ImGuizmo::LOCAL;
-
-                ImGui::Checkbox("Snap", &gizmo_snap_enabled);
-                ImGui::BeginDisabled(!gizmo_snap_enabled);
-                if (gizmo_operation == ImGuizmo::ROTATE)
-                    ImGui::SliderFloat("Rotate snap", &gizmo_rotate_snap, 1.0f, 90.0f, "%.1f deg");
-                else if (gizmo_operation == ImGuizmo::SCALE)
-                    ImGui::SliderFloat("Scale snap", &gizmo_scale_snap, 0.01f, 1.0f, "%.2f");
-                else
-                    ImGui::SliderFloat("Move snap", &gizmo_translate_snap, 0.01f, 10.0f, "%.2f m");
-                ImGui::EndDisabled();
-                ImGui::EndDisabled();
-
-                ImGui::Separator();
-                auto outline_settings = m_renderer->selection_outline_settings();
-                bool outline_settings_changed = false;
-                outline_settings_changed |= ImGui::ColorEdit3("Glow color", outline_settings.color.data());
-                outline_settings_changed |= ImGui::SliderFloat("Outline width",
-                                                               &outline_settings.width,
-                                                               0.01f,
-                                                               0.5f,
-                                                               "%.3f");
-                outline_settings_changed |= ImGui::SliderInt("Smoothing quality",
-                                                             &outline_settings.smoothing_quality,
-                                                             1,
-                                                             64);
-                if (outline_settings_changed)
-                    m_renderer->set_selection_outline_settings(outline_settings);
 
                 ImGui::End();
 

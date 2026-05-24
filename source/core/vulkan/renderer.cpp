@@ -326,6 +326,15 @@ namespace rose::core::vulkan
             float outline_padding[3]{};
         };
 
+        struct BloomPushConstants final
+        {
+            float texel_size[2]{};
+            float threshold = 1.0f;
+            float intensity = 0.0f;
+            float radius = 1.0f;
+            int32_t quality = 1;
+        };
+
         [[nodiscard]] const char* dlss_quality_label(DlssQuality quality) noexcept
         {
             switch (quality)
@@ -537,10 +546,16 @@ namespace rose::core::vulkan
         VkRenderPass m_render_pass = VK_NULL_HANDLE;
         VkRenderPass m_present_render_pass = VK_NULL_HANDLE;
         VkDescriptorSetLayout m_descriptor_set_layout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout m_post_descriptor_set_layout = VK_NULL_HANDLE;
         VkPipelineLayout m_pipeline_layout = VK_NULL_HANDLE;
+        VkPipelineLayout m_bloom_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline m_graphics_pipeline = VK_NULL_HANDLE;
         VkPipeline m_outline_pipeline = VK_NULL_HANDLE;
+        VkPipeline m_bloom_pipeline = VK_NULL_HANDLE;
         VkDescriptorPool m_descriptor_pool = VK_NULL_HANDLE;
+        VkDescriptorSet m_bloom_descriptor_set = VK_NULL_HANDLE;
+        VkImageView m_bloom_descriptor_image_view = VK_NULL_HANDLE;
+        VkSampler m_bloom_sampler = VK_NULL_HANDLE;
 
         VkCommandPool m_command_pool = VK_NULL_HANDLE;
         std::vector<VkCommandBuffer> m_command_buffers;
@@ -582,6 +597,7 @@ namespace rose::core::vulkan
         float m_dlss_sharpness = 0.0f;
         bool m_dlss_reset_next_frame = true;
         SelectionOutlineSettings m_selection_outline_settings{};
+        BloomSettings m_bloom_settings{};
 
         std::vector<std::string> m_ngx_instance_extensions;
         std::vector<std::string> m_ngx_device_extensions;
@@ -649,10 +665,18 @@ namespace rose::core::vulkan
                 vkDestroyPipeline(m_device, m_graphics_pipeline, nullptr);
             if (m_outline_pipeline != VK_NULL_HANDLE)
                 vkDestroyPipeline(m_device, m_outline_pipeline, nullptr);
+            if (m_bloom_pipeline != VK_NULL_HANDLE)
+                vkDestroyPipeline(m_device, m_bloom_pipeline, nullptr);
             if (m_pipeline_layout != VK_NULL_HANDLE)
                 vkDestroyPipelineLayout(m_device, m_pipeline_layout, nullptr);
+            if (m_bloom_pipeline_layout != VK_NULL_HANDLE)
+                vkDestroyPipelineLayout(m_device, m_bloom_pipeline_layout, nullptr);
             if (m_descriptor_set_layout != VK_NULL_HANDLE)
                 vkDestroyDescriptorSetLayout(m_device, m_descriptor_set_layout, nullptr);
+            if (m_post_descriptor_set_layout != VK_NULL_HANDLE)
+                vkDestroyDescriptorSetLayout(m_device, m_post_descriptor_set_layout, nullptr);
+            if (m_bloom_sampler != VK_NULL_HANDLE)
+                vkDestroySampler(m_device, m_bloom_sampler, nullptr);
             if (m_render_pass != VK_NULL_HANDLE)
                 vkDestroyRenderPass(m_device, m_render_pass, nullptr);
             if (m_present_render_pass != VK_NULL_HANDLE)
@@ -1190,6 +1214,7 @@ namespace rose::core::vulkan
             }
 
             release_dlss_feature();
+            m_bloom_descriptor_image_view = VK_NULL_HANDLE;
             destroy_image(m_dlss_output_image);
             destroy_image(m_motion_vector_image);
             destroy_image(m_scene_color_image);
@@ -1248,6 +1273,15 @@ namespace rose::core::vulkan
             m_selection_outline_settings.width = std::clamp(m_selection_outline_settings.width, 0.0f, 2.0f);
             m_selection_outline_settings.smoothing_quality =
                 std::clamp(m_selection_outline_settings.smoothing_quality, 1, 64);
+        }
+
+        void set_bloom_settings(const BloomSettings& settings)
+        {
+            m_bloom_settings = settings;
+            m_bloom_settings.threshold = std::clamp(m_bloom_settings.threshold, 0.0f, 8.0f);
+            m_bloom_settings.intensity = std::clamp(m_bloom_settings.intensity, 0.0f, 5.0f);
+            m_bloom_settings.radius = std::clamp(m_bloom_settings.radius, 0.0f, 32.0f);
+            m_bloom_settings.quality = std::clamp(m_bloom_settings.quality, 1, 64);
         }
 
         void create_instance()
@@ -1876,7 +1910,44 @@ namespace rose::core::vulkan
             layout_info.pBindings = &sampler_layout_binding;
             check_vk(vkCreateDescriptorSetLayout(m_device, &layout_info, nullptr, &m_descriptor_set_layout),
                      "Failed to create descriptor set layout");
-            spdlog::info("Vulkan: descriptor set layout created");
+
+            VkDescriptorSetLayoutBinding post_sampler_layout_binding{};
+            post_sampler_layout_binding.binding = 0;
+            post_sampler_layout_binding.descriptorCount = 1;
+            post_sampler_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            post_sampler_layout_binding.pImmutableSamplers = nullptr;
+            post_sampler_layout_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+            VkDescriptorSetLayoutCreateInfo post_layout_info{};
+            post_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            post_layout_info.bindingCount = 1;
+            post_layout_info.pBindings = &post_sampler_layout_binding;
+            check_vk(vkCreateDescriptorSetLayout(m_device, &post_layout_info, nullptr, &m_post_descriptor_set_layout),
+                     "Failed to create post-process descriptor set layout");
+
+            VkSamplerCreateInfo sampler_info{};
+            sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            sampler_info.magFilter = VK_FILTER_LINEAR;
+            sampler_info.minFilter = VK_FILTER_LINEAR;
+            sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            sampler_info.anisotropyEnable = VK_FALSE;
+            sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+            sampler_info.unnormalizedCoordinates = VK_FALSE;
+            sampler_info.compareEnable = VK_FALSE;
+            sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            check_vk(vkCreateSampler(m_device, &sampler_info, nullptr, &m_bloom_sampler),
+                     "Failed to create bloom sampler");
+
+            VkDescriptorSetAllocateInfo alloc_info{};
+            alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            alloc_info.descriptorPool = m_descriptor_pool;
+            alloc_info.descriptorSetCount = 1;
+            alloc_info.pSetLayouts = &m_post_descriptor_set_layout;
+            check_vk(vkAllocateDescriptorSets(m_device, &alloc_info, &m_bloom_descriptor_set),
+                     "Failed to allocate bloom descriptor set");
+            spdlog::info("Vulkan: descriptor set layouts created");
         }
 
         void create_graphics_pipeline()
@@ -2051,8 +2122,98 @@ namespace rose::core::vulkan
 
             check_vk(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_outline_pipeline),
                      "Failed to create outline pipeline");
+
+            const std::filesystem::path post_vert_shader_path = shader_path("post.vert.spv");
+            const std::filesystem::path bloom_frag_shader_path = shader_path("bloom.frag.spv");
+            spdlog::info("Vulkan: creating bloom pipeline using shaders '{}' and '{}'",
+                         post_vert_shader_path.string(),
+                         bloom_frag_shader_path.string());
+            const std::vector<char> post_vert_shader_code = read_binary_file(post_vert_shader_path);
+            const std::vector<char> bloom_frag_shader_code = read_binary_file(bloom_frag_shader_path);
+            const VkShaderModule post_vert_shader_module = create_shader_module(post_vert_shader_code);
+            const VkShaderModule bloom_frag_shader_module = create_shader_module(bloom_frag_shader_code);
+
+            VkPipelineShaderStageCreateInfo post_vert_shader_stage_info{};
+            post_vert_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            post_vert_shader_stage_info.stage = VK_SHADER_STAGE_VERTEX_BIT;
+            post_vert_shader_stage_info.module = post_vert_shader_module;
+            post_vert_shader_stage_info.pName = "main";
+
+            VkPipelineShaderStageCreateInfo bloom_frag_shader_stage_info{};
+            bloom_frag_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            bloom_frag_shader_stage_info.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            bloom_frag_shader_stage_info.module = bloom_frag_shader_module;
+            bloom_frag_shader_stage_info.pName = "main";
+
+            const VkPipelineShaderStageCreateInfo bloom_shader_stages[] = {
+                post_vert_shader_stage_info,
+                bloom_frag_shader_stage_info
+            };
+
+            VkPipelineVertexInputStateCreateInfo bloom_vertex_input_info{};
+            bloom_vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+            VkPipelineRasterizationStateCreateInfo bloom_rasterizer = rasterizer;
+            bloom_rasterizer.cullMode = VK_CULL_MODE_NONE;
+
+            VkPipelineDepthStencilStateCreateInfo bloom_depth_stencil{};
+            bloom_depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            bloom_depth_stencil.depthTestEnable = VK_FALSE;
+            bloom_depth_stencil.depthWriteEnable = VK_FALSE;
+            bloom_depth_stencil.depthBoundsTestEnable = VK_FALSE;
+            bloom_depth_stencil.stencilTestEnable = VK_FALSE;
+
+            VkPipelineColorBlendStateCreateInfo bloom_color_blending{};
+            bloom_color_blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            bloom_color_blending.logicOpEnable = VK_FALSE;
+            bloom_color_blending.attachmentCount = 1;
+            bloom_color_blending.pAttachments = &color_blend_attachment;
+
+            VkPushConstantRange bloom_push_constant_range{};
+            bloom_push_constant_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            bloom_push_constant_range.offset = 0;
+            bloom_push_constant_range.size = sizeof(BloomPushConstants);
+
+            VkPipelineLayoutCreateInfo bloom_pipeline_layout_info{};
+            bloom_pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            bloom_pipeline_layout_info.setLayoutCount = 1;
+            bloom_pipeline_layout_info.pSetLayouts = &m_post_descriptor_set_layout;
+            bloom_pipeline_layout_info.pushConstantRangeCount = 1;
+            bloom_pipeline_layout_info.pPushConstantRanges = &bloom_push_constant_range;
+
+            check_vk(vkCreatePipelineLayout(m_device,
+                                            &bloom_pipeline_layout_info,
+                                            nullptr,
+                                            &m_bloom_pipeline_layout),
+                     "Failed to create bloom pipeline layout");
+
+            VkGraphicsPipelineCreateInfo bloom_pipeline_info{};
+            bloom_pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            bloom_pipeline_info.stageCount = 2;
+            bloom_pipeline_info.pStages = bloom_shader_stages;
+            bloom_pipeline_info.pVertexInputState = &bloom_vertex_input_info;
+            bloom_pipeline_info.pInputAssemblyState = &input_assembly;
+            bloom_pipeline_info.pViewportState = &viewport_state;
+            bloom_pipeline_info.pRasterizationState = &bloom_rasterizer;
+            bloom_pipeline_info.pMultisampleState = &multisampling;
+            bloom_pipeline_info.pDepthStencilState = &bloom_depth_stencil;
+            bloom_pipeline_info.pColorBlendState = &bloom_color_blending;
+            bloom_pipeline_info.pDynamicState = &dynamic_state;
+            bloom_pipeline_info.layout = m_bloom_pipeline_layout;
+            bloom_pipeline_info.renderPass = m_present_render_pass;
+            bloom_pipeline_info.subpass = 0;
+
+            check_vk(vkCreateGraphicsPipelines(m_device,
+                                               VK_NULL_HANDLE,
+                                               1,
+                                               &bloom_pipeline_info,
+                                               nullptr,
+                                               &m_bloom_pipeline),
+                     "Failed to create bloom pipeline");
             spdlog::info("Vulkan: graphics pipelines created");
 
+            vkDestroyShaderModule(m_device, bloom_frag_shader_module, nullptr);
+            vkDestroyShaderModule(m_device, post_vert_shader_module, nullptr);
             vkDestroyShaderModule(m_device, frag_shader_module, nullptr);
             vkDestroyShaderModule(m_device, vert_shader_module, nullptr);
         }
@@ -2634,6 +2795,111 @@ namespace rose::core::vulkan
                                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
         }
 
+        void update_bloom_descriptor(const ImageResource& source)
+        {
+            if (m_bloom_descriptor_image_view == source.view)
+                return;
+
+            VkDescriptorImageInfo image_info{};
+            image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            image_info.imageView = source.view;
+            image_info.sampler = m_bloom_sampler;
+
+            VkWriteDescriptorSet descriptor_write{};
+            descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptor_write.dstSet = m_bloom_descriptor_set;
+            descriptor_write.dstBinding = 0;
+            descriptor_write.dstArrayElement = 0;
+            descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptor_write.descriptorCount = 1;
+            descriptor_write.pImageInfo = &image_info;
+
+            vkUpdateDescriptorSets(m_device, 1, &descriptor_write, 0, nullptr);
+            m_bloom_descriptor_image_view = source.view;
+        }
+
+        void render_bloom_to_swapchain(ImageResource& source)
+        {
+            record_image_barrier(source,
+                                 VK_IMAGE_ASPECT_COLOR_BIT,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                 VK_ACCESS_SHADER_WRITE_BIT
+                                     | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                                     | VK_ACCESS_TRANSFER_WRITE_BIT,
+                                 VK_ACCESS_SHADER_READ_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                                     | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                     | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+            record_swapchain_barrier(VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     0,
+                                     VK_ACCESS_TRANSFER_WRITE_BIT,
+                                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT);
+            constexpr VkClearColorValue clear_color{{0.0f, 0.0f, 0.0f, 1.0f}};
+            const VkImageSubresourceRange color_range{
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,
+                1,
+                0,
+                1
+            };
+            vkCmdClearColorImage(m_active_command_buffer,
+                                 m_swapchain_images[m_active_image_index],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 &clear_color,
+                                 1,
+                                 &color_range);
+            record_swapchain_barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                     VK_ACCESS_TRANSFER_WRITE_BIT,
+                                     VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
+            update_bloom_descriptor(source);
+            begin_present_render_pass();
+
+            VkViewport viewport{};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = static_cast<float>(m_swapchain_extent.width);
+            viewport.height = static_cast<float>(m_swapchain_extent.height);
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+            vkCmdSetViewport(m_active_command_buffer, 0, 1, &viewport);
+
+            const VkRect2D scissor{{0, 0}, m_swapchain_extent};
+            vkCmdSetScissor(m_active_command_buffer, 0, 1, &scissor);
+
+            BloomPushConstants push{};
+            push.texel_size[0] = 1.0f / static_cast<float>(source.extent.width);
+            push.texel_size[1] = 1.0f / static_cast<float>(source.extent.height);
+            push.threshold = m_bloom_settings.threshold;
+            push.intensity = m_bloom_settings.intensity;
+            push.radius = m_bloom_settings.radius;
+            push.quality = m_bloom_settings.quality;
+
+            vkCmdBindPipeline(m_active_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_bloom_pipeline);
+            vkCmdBindDescriptorSets(m_active_command_buffer,
+                                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_bloom_pipeline_layout,
+                                    0,
+                                    1,
+                                    &m_bloom_descriptor_set,
+                                    0,
+                                    nullptr);
+            vkCmdPushConstants(m_active_command_buffer,
+                               m_bloom_pipeline_layout,
+                               VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0,
+                               sizeof(BloomPushConstants),
+                               &push);
+            vkCmdDraw(m_active_command_buffer, 3, 1, 0, 0);
+        }
+
         [[nodiscard]] bool evaluate_dlss()
         {
 #ifdef ROSE_ENABLE_NGX_DLSS
@@ -2664,9 +2930,9 @@ namespace rose::core::vulkan
             record_image_barrier(m_dlss_output_image,
                                  VK_IMAGE_ASPECT_COLOR_BIT,
                                  VK_IMAGE_LAYOUT_GENERAL,
-                                 VK_ACCESS_TRANSFER_READ_BIT,
+                                 VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT,
                                  VK_ACCESS_SHADER_WRITE_BIT,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
             const VkImageSubresourceRange color_range{
@@ -2774,8 +3040,13 @@ namespace rose::core::vulkan
             ImageResource* resolved_source = &m_scene_color_image;
             if (evaluate_dlss())
                 resolved_source = &m_dlss_output_image;
-            blit_to_swapchain(*resolved_source);
-            begin_present_render_pass();
+            if (m_bloom_settings.enabled)
+                render_bloom_to_swapchain(*resolved_source);
+            else
+            {
+                blit_to_swapchain(*resolved_source);
+                begin_present_render_pass();
+            }
         }
 
         void copy_buffer_to_image(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) const
@@ -3261,5 +3532,15 @@ namespace rose::core::vulkan
     void Renderer::set_selection_outline_settings(const SelectionOutlineSettings& settings)
     {
         m_impl->set_selection_outline_settings(settings);
+    }
+
+    BloomSettings Renderer::bloom_settings() const
+    {
+        return m_impl->m_bloom_settings;
+    }
+
+    void Renderer::set_bloom_settings(const BloomSettings& settings)
+    {
+        m_impl->set_bloom_settings(settings);
     }
 } // namespace rose::core::vulkan
