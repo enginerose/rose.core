@@ -38,6 +38,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 static void GlfwErrorCallback(int code, const char* desc)
 {
@@ -79,6 +80,110 @@ static std::vector<std::byte> EncodeStreamFrame(const rose::core::vulkan::Captur
         4,
         pixels);
     return bmp;
+}
+
+static rose::core::vulkan::Mesh CreateMarkerMesh(const std::array<float, 4>& base_color,
+                                                 const std::array<float, 3>& emissive,
+                                                 const omath::Vector3<float>& origin,
+                                                 const omath::Vector3<float>& scale)
+{
+    using Vertex = omath::opengl_engine::Mesh::VertexType;
+
+    std::vector<Vertex> vertices{
+        {{-0.5f, -0.5f, -0.5f}, {-1.0f, -1.0f, -1.0f}, {0.0f, 0.0f}},
+        {{ 0.5f, -0.5f, -0.5f}, { 1.0f, -1.0f, -1.0f}, {1.0f, 0.0f}},
+        {{ 0.5f,  0.5f, -0.5f}, { 1.0f,  1.0f, -1.0f}, {1.0f, 1.0f}},
+        {{-0.5f,  0.5f, -0.5f}, {-1.0f,  1.0f, -1.0f}, {0.0f, 1.0f}},
+        {{-0.5f, -0.5f,  0.5f}, {-1.0f, -1.0f,  1.0f}, {0.0f, 0.0f}},
+        {{ 0.5f, -0.5f,  0.5f}, { 1.0f, -1.0f,  1.0f}, {1.0f, 0.0f}},
+        {{ 0.5f,  0.5f,  0.5f}, { 1.0f,  1.0f,  1.0f}, {1.0f, 1.0f}},
+        {{-0.5f,  0.5f,  0.5f}, {-1.0f,  1.0f,  1.0f}, {0.0f, 1.0f}},
+    };
+    std::vector<omath::Vector3<uint32_t>> triangles{
+        {0, 2, 1}, {0, 3, 2},
+        {4, 5, 6}, {4, 6, 7},
+        {0, 1, 5}, {0, 5, 4},
+        {3, 6, 2}, {3, 7, 6},
+        {1, 2, 6}, {1, 6, 5},
+        {0, 4, 7}, {0, 7, 3},
+    };
+
+    rose::core::vulkan::PbrMaterial material;
+    material.base_color_factor = base_color;
+    material.emissive_factor = emissive;
+
+    rose::core::vulkan::Mesh mesh{
+        omath::opengl_engine::Mesh{std::move(vertices), std::move(triangles)},
+        {},
+        material
+    };
+    mesh.cpu_mesh().set_origin(origin);
+    mesh.cpu_mesh().set_scale(scale);
+    return mesh;
+}
+
+static rose::core::vulkan::Mesh CreateSpotlightMarkerMesh()
+{
+    return CreateMarkerMesh({1.0f, 0.25f, 0.75f, 1.0f},
+                            {1.0f, 0.25f, 0.75f},
+                            {0.0f, 5.0f, 0.0f},
+                            {0.25f, 0.25f, 0.25f});
+}
+
+static rose::core::vulkan::Mesh CreateSunMarkerMesh()
+{
+    return CreateMarkerMesh({1.0f, 0.86f, 0.18f, 1.0f},
+                            {1.0f, 0.62f, 0.08f},
+                            {8.0f, 16.0f, 8.0f},
+                            {0.45f, 0.45f, 0.45f});
+}
+
+static omath::Vector3<float> Normalized(omath::Vector3<float> value)
+{
+    const float length = std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
+    if (length <= 0.0001f)
+        return {0.0f, 0.0f, -1.0f};
+    return value / length;
+}
+
+static omath::Vector3<float> MatrixForward(const omath::opengl_engine::Mat4X4& matrix)
+{
+    return Normalized({
+        -matrix.at(0, 2),
+        -matrix.at(1, 2),
+        -matrix.at(2, 2)
+    });
+}
+
+static bool PickProjectedSphere(const omath::Vector2<float>& screen_position,
+                                const omath::opengl_engine::Camera& camera,
+                                const omath::Vector3<float>& center,
+                                const omath::Vector2<int>& framebuffer_size,
+                                float pixel_radius)
+{
+    const auto& view_projection = camera.get_view_projection_matrix();
+    const float clip_x = view_projection.at(0, 0) * center.x
+                       + view_projection.at(0, 1) * center.y
+                       + view_projection.at(0, 2) * center.z
+                       + view_projection.at(0, 3);
+    const float clip_y = view_projection.at(1, 0) * center.x
+                       + view_projection.at(1, 1) * center.y
+                       + view_projection.at(1, 2) * center.z
+                       + view_projection.at(1, 3);
+    const float clip_w = view_projection.at(3, 0) * center.x
+                       + view_projection.at(3, 1) * center.y
+                       + view_projection.at(3, 2) * center.z
+                       + view_projection.at(3, 3);
+    if (clip_w <= 0.0001f)
+        return false;
+
+    const float ndc_x = clip_x / clip_w;
+    const float ndc_y = clip_y / clip_w;
+    const float screen_x = (ndc_x * 0.5f + 0.5f) * static_cast<float>(framebuffer_size.x);
+    const float screen_y = (0.5f - ndc_y * 0.5f) * static_cast<float>(framebuffer_size.y);
+    const float dx = screen_position.x - screen_x;
+    const float dy = screen_position.y - screen_y;
+    return dx * dx + dy * dy <= pixel_radius * pixel_radius;
 }
 
 namespace rose::core
@@ -267,6 +372,13 @@ namespace rose::core
             0.1f,
             10000.f
         };
+        auto spotlight_marker = CreateSpotlightMarkerMesh();
+        auto spotlight_settings = m_renderer->spotlight_settings();
+        auto spotlight_direction = spotlight_settings.direction;
+        spotlight_marker.cpu_mesh().set_origin(spotlight_settings.position);
+        auto sun_marker = CreateSunMarkerMesh();
+        auto sun_settings = m_renderer->sun_settings();
+        sun_marker.cpu_mesh().set_origin(Normalized(-sun_settings.direction) * 18.0f);
 
         constexpr float radians_per_degree = 3.14159265358979323846f / 180.0f;
         constexpr float degrees_per_radian = 180.0f / 3.14159265358979323846f;
@@ -287,6 +399,8 @@ namespace rose::core
         float  ground_max_slope_degrees = std::acos(Player::k_floor_dot) * degrees_per_radian;
         int    fps_limit = 60;
         std::optional<std::size_t> selected_mesh;
+        bool   spotlight_selected = false;
+        bool   sun_selected = false;
         ImGuizmo::OPERATION gizmo_operation = ImGuizmo::TRANSLATE;
         ImGuizmo::MODE      gizmo_mode = ImGuizmo::WORLD;
         bool   gizmo_snap_enabled = false;
@@ -348,7 +462,7 @@ namespace rose::core
             ImDrawList* scene_gizmo_draw_list = nullptr;
             bool scene_gizmo_window_hovered = false;
             bool overlay_window_hovered = false;
-            if (selected_mesh && !mouse_captured)
+            if ((selected_mesh || spotlight_selected || sun_selected) && !mouse_captured)
             {
                 const ImGuiIO& io = ImGui::GetIO();
                 ImGui::SetNextWindowPos({0.0f, 0.0f});
@@ -452,6 +566,54 @@ namespace rose::core
                             m_renderer->set_bloom_settings(bloom_settings);
 
                         ImGui::Separator();
+                        bool spotlight_changed = false;
+                        spotlight_changed |= ImGui::Checkbox("Spotlight", &spotlight_settings.enabled);
+                        ImGui::BeginDisabled(!spotlight_settings.enabled);
+                        spotlight_changed |= ImGui::ColorEdit3("Light color", spotlight_settings.color.data());
+                        spotlight_changed |= ImGui::SliderFloat("Light intensity",
+                                                                &spotlight_settings.intensity,
+                                                                0.0f,
+                                                                250.0f,
+                                                                "%.1f");
+                        spotlight_changed |= ImGui::SliderFloat("Light range",
+                                                                &spotlight_settings.range,
+                                                                1.0f,
+                                                                100.0f,
+                                                                "%.1f m");
+                        spotlight_changed |= ImGui::SliderFloat("Inner cone",
+                                                                &spotlight_settings.inner_angle_degrees,
+                                                                1.0f,
+                                                                89.0f,
+                                                                "%.1f deg");
+                        spotlight_changed |= ImGui::SliderFloat("Outer cone",
+                                                                &spotlight_settings.outer_angle_degrees,
+                                                                1.0f,
+                                                                89.9f,
+                                                                "%.1f deg");
+                        ImGui::EndDisabled();
+                        if (spotlight_changed && spotlight_settings.outer_angle_degrees <= spotlight_settings.inner_angle_degrees)
+                            spotlight_settings.outer_angle_degrees = spotlight_settings.inner_angle_degrees + 0.1f;
+
+                        ImGui::Separator();
+                        bool sun_changed = false;
+                        sun_changed |= ImGui::Checkbox("Sun", &sun_settings.enabled);
+                        ImGui::BeginDisabled(!sun_settings.enabled);
+                        sun_changed |= ImGui::ColorEdit3("Sun color", sun_settings.color.data());
+                        sun_changed |= ImGui::SliderFloat("Sun intensity",
+                                                          &sun_settings.intensity,
+                                                          0.0f,
+                                                          10.0f,
+                                                          "%.2f");
+                        sun_changed |= ImGui::SliderFloat("Sun shadow area",
+                                                          &sun_settings.shadow_distance,
+                                                          5.0f,
+                                                          200.0f,
+                                                          "%.1f m");
+                        ImGui::EndDisabled();
+                        if (sun_changed)
+                            m_renderer->set_sun_settings(sun_settings);
+
+                        ImGui::Separator();
                         bool dlss_enabled = m_renderer->dlss_enabled();
                         ImGui::BeginDisabled(!m_renderer->dlss_available());
                         if (ImGui::Checkbox("DLSS", &dlss_enabled))
@@ -480,9 +642,13 @@ namespace rose::core
                     {
                         if (selected_mesh)
                             ImGui::Text("Selected mesh: %zu", *selected_mesh);
+                        else if (spotlight_selected)
+                            ImGui::TextUnformatted("Selected object: spotlight");
+                        else if (sun_selected)
+                            ImGui::TextUnformatted("Selected object: sun");
                         else
-                            ImGui::TextUnformatted("Selected mesh: none");
-                        ImGui::BeginDisabled(!selected_mesh);
+                            ImGui::TextUnformatted("Selected object: none");
+                        ImGui::BeginDisabled(!selected_mesh && !spotlight_selected && !sun_selected);
                         if (ImGui::RadioButton("Move", gizmo_operation == ImGuizmo::TRANSLATE))
                             gizmo_operation = ImGuizmo::TRANSLATE;
                         ImGui::SameLine();
@@ -544,7 +710,7 @@ namespace rose::core
 
             const bool middle_mouse_pressed = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
             if (!mouse_captured
-                && selected_mesh
+                && (selected_mesh || spotlight_selected || sun_selected)
                 && middle_mouse_pressed
                 && !middle_mouse_was_pressed
                 && !overlay_window_hovered
@@ -603,9 +769,17 @@ namespace rose::core
             framebuffer = m_renderer->framebuffer_size();
             camera.set_view_port({static_cast<float>(framebuffer.x), static_cast<float>(framebuffer.y)});
 
-            if (selected_mesh && !mouse_captured && scene_gizmo_draw_list != nullptr)
+            if ((selected_mesh || spotlight_selected || sun_selected) && !mouse_captured && scene_gizmo_draw_list != nullptr)
             {
-                if (auto model_matrix = map.mesh_matrix(*selected_mesh))
+                std::optional<omath::opengl_engine::Mat4X4> model_matrix;
+                if (selected_mesh)
+                    model_matrix = map.mesh_matrix(*selected_mesh);
+                else if (spotlight_selected)
+                    model_matrix = spotlight_marker.cpu_mesh().get_to_world_matrix();
+                else if (sun_selected)
+                    model_matrix = sun_marker.cpu_mesh().get_to_world_matrix();
+
+                if (model_matrix)
                 {
                     const ImGuiIO& io = ImGui::GetIO();
                     auto gizmo_camera = camera;
@@ -638,16 +812,34 @@ namespace rose::core
                                              nullptr,
                                              gizmo_snap_enabled ? snap_values.data() : nullptr))
                     {
-                        if (gizmo_operation == ImGuizmo::TRANSLATE)
+                        const omath::opengl_engine::Mat4X4 updated_matrix(matrix.data());
+                        if (selected_mesh)
                         {
-                            map.set_mesh_origin(*selected_mesh, omath::mat_extract_origin(omath::opengl_engine::Mat4X4(matrix.data())));
-                        }
-                        else
-                            map.set_mesh_matrix(*selected_mesh, omath::opengl_engine::Mat4X4(matrix.data()));
+                            if (gizmo_operation == ImGuizmo::TRANSLATE)
+                                map.set_mesh_origin(*selected_mesh, omath::mat_extract_origin(updated_matrix));
+                            else
+                                map.set_mesh_matrix(*selected_mesh, updated_matrix);
 
-                        world.update_collider(
-                            *selected_mesh,
-                            CollisionWorld::Collider(map.get_meshes()[*selected_mesh].cpu_mesh()));
+                            world.update_collider(
+                                *selected_mesh,
+                                CollisionWorld::Collider(map.get_meshes()[*selected_mesh].cpu_mesh()));
+                        }
+                        else if (spotlight_selected)
+                        {
+                            auto& light_mesh = spotlight_marker.cpu_mesh();
+                            light_mesh.set_origin(omath::mat_extract_origin(updated_matrix));
+                            if (gizmo_operation == ImGuizmo::ROTATE)
+                                spotlight_direction = MatrixForward(updated_matrix);
+                            else if (gizmo_operation == ImGuizmo::SCALE)
+                                light_mesh.set_scale(omath::mat_extract_scale(updated_matrix));
+                        }
+                        else if (sun_selected)
+                        {
+                            auto& light_mesh = sun_marker.cpu_mesh();
+                            light_mesh.set_origin(omath::mat_extract_origin(updated_matrix));
+                            if (gizmo_operation == ImGuizmo::SCALE)
+                                light_mesh.set_scale(omath::mat_extract_scale(updated_matrix));
+                        }
                     }
                 }
             }
@@ -675,17 +867,48 @@ namespace rose::core
                     ? static_cast<float>(framebuffer.y) / static_cast<float>(window_height)
                     : 1.f;
 
-                selected_mesh = map.pick_mesh(
-                    {static_cast<float>(cursor_x) * scale_x, static_cast<float>(cursor_y) * scale_y},
-                    camera);
+                const omath::Vector2<float> screen_position{
+                    static_cast<float>(cursor_x) * scale_x,
+                    static_cast<float>(cursor_y) * scale_y
+                };
+                if (PickProjectedSphere(screen_position, camera, spotlight_marker.cpu_mesh().get_origin(), framebuffer, 22.0f))
+                {
+                    spotlight_selected = true;
+                    sun_selected = false;
+                    selected_mesh.reset();
+                }
+                else if (PickProjectedSphere(screen_position, camera, sun_marker.cpu_mesh().get_origin(), framebuffer, 26.0f))
+                {
+                    spotlight_selected = false;
+                    sun_selected = true;
+                    selected_mesh.reset();
+                }
+                else
+                {
+                    selected_mesh = map.pick_mesh(screen_position, camera);
+                    spotlight_selected = false;
+                    sun_selected = false;
+                }
             }
             left_mouse_was_pressed = left_mouse_pressed;
+
+            spotlight_settings.position = spotlight_marker.cpu_mesh().get_origin();
+            spotlight_settings.direction = spotlight_direction;
+            m_renderer->set_spotlight_settings(spotlight_settings);
+            sun_settings.direction = Normalized(-sun_marker.cpu_mesh().get_origin());
+            m_renderer->set_sun_settings(sun_settings);
 
             ImGui::Render();
 
             if (m_renderer->begin_frame())
             {
                 map.draw(*m_renderer, camera, selected_mesh);
+                m_renderer->draw_mesh(spotlight_marker, camera);
+                if (spotlight_selected)
+                    m_renderer->draw_mesh_outline(spotlight_marker, camera);
+                m_renderer->draw_mesh(sun_marker, camera);
+                if (sun_selected)
+                    m_renderer->draw_mesh_outline(sun_marker, camera);
                 m_renderer->render_imgui(ImGui::GetDrawData());
 
                 bool capture_frame = false;

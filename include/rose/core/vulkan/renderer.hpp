@@ -9,6 +9,7 @@
 #include <memory>
 #include <omath/engines/opengl_engine/camera.hpp>
 #include <omath/linear_algebra/vector2.hpp>
+#include <omath/linear_algebra/vector3.hpp>
 #include <optional>
 #include <string>
 #include <vector>
@@ -42,6 +43,27 @@ namespace rose::core::vulkan
         float intensity = 0.35f;
         float radius = 2.0f;
         int quality = 8;
+    };
+
+    struct SpotlightSettings final
+    {
+        bool enabled = true;
+        omath::Vector3<float> position{0.0f, 5.0f, 0.0f};
+        omath::Vector3<float> direction{0.0f, 0.0f, -1.0f};
+        std::array<float, 3> color{1.0f, 0.25f, 0.75f};
+        float intensity = 45.0f;
+        float range = 25.0f;
+        float inner_angle_degrees = 18.0f;
+        float outer_angle_degrees = 32.0f;
+    };
+
+    struct SunSettings final
+    {
+        bool enabled = true;
+        omath::Vector3<float> direction{-0.35f, -0.75f, -0.45f};
+        std::array<float, 3> color{1.0f, 0.9f, 0.55f};
+        float intensity = 2.5f;
+        float shadow_distance = 60.0f;
     };
 
     enum class CapturedFrameFormat
@@ -85,6 +107,10 @@ namespace rose::core::vulkan
         void set_selection_outline_settings(const SelectionOutlineSettings& settings);
         [[nodiscard]] BloomSettings bloom_settings() const;
         void set_bloom_settings(const BloomSettings& settings);
+        [[nodiscard]] SpotlightSettings spotlight_settings() const;
+        void set_spotlight_settings(const SpotlightSettings& settings);
+        [[nodiscard]] SunSettings sun_settings() const;
+        void set_sun_settings(const SunSettings& settings);
 
     private:
         struct Impl;

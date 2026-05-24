@@ -250,24 +250,50 @@ namespace rose::core
                 triangles.push_back({flat[i], flat[i+1], flat[i+2]});
         }
 
-        // ---- Material / base-colour texture ----
+        // ---- Material / PBR textures ----
         std::vector<vulkan::MeshTexture> mesh_textures;
+        vulkan::PbrMaterial material;
         if (prim.material >= 0)
         {
             const auto& mat = gltf.materials[prim.material];
-            const int base_idx = mat.pbrMetallicRoughness.baseColorTexture.index;
-            if (base_idx >= 0)
+            const auto& pbr = mat.pbrMetallicRoughness;
+
+            if (pbr.baseColorFactor.size() == material.base_color_factor.size())
             {
-                const int source = gltf.textures[base_idx].source;
-                if (source >= 0 && textures[static_cast<size_t>(source)])
-                    mesh_textures.push_back({textures[static_cast<size_t>(source)],
-                                             vulkan::TextureType::BaseColor});
+                for (std::size_t i = 0; i < material.base_color_factor.size(); ++i)
+                    material.base_color_factor[i] = static_cast<float>(pbr.baseColorFactor[i]);
             }
+            if (mat.emissiveFactor.size() == material.emissive_factor.size())
+            {
+                for (std::size_t i = 0; i < material.emissive_factor.size(); ++i)
+                    material.emissive_factor[i] = static_cast<float>(mat.emissiveFactor[i]);
+            }
+            material.metallic_factor = static_cast<float>(pbr.metallicFactor);
+            material.roughness_factor = static_cast<float>(pbr.roughnessFactor);
+            material.normal_scale = static_cast<float>(mat.normalTexture.scale);
+
+            const auto add_texture = [&](int texture_index, vulkan::TextureType type)
+            {
+                if (texture_index < 0 || texture_index >= static_cast<int>(gltf.textures.size()))
+                    return;
+
+                const int source = gltf.textures[texture_index].source;
+                if (source >= 0
+                    && source < static_cast<int>(textures.size())
+                    && textures[static_cast<std::size_t>(source)])
+                    mesh_textures.push_back({textures[static_cast<std::size_t>(source)], type});
+            };
+
+            add_texture(pbr.baseColorTexture.index, vulkan::TextureType::BaseColor);
+            add_texture(mat.normalTexture.index, vulkan::TextureType::Normal);
+            add_texture(pbr.metallicRoughnessTexture.index, vulkan::TextureType::MetallicRoughness);
+            add_texture(mat.emissiveTexture.index, vulkan::TextureType::Emissive);
         }
 
         return vulkan::Mesh{
             omath::opengl_engine::Mesh{std::move(vertices), std::move(triangles)},
-            std::move(mesh_textures)
+            std::move(mesh_textures),
+            material
         };
     }
 

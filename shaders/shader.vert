@@ -15,10 +15,25 @@ layout(push_constant) uniform PushConstants {
     vec3 uOutlinePadding;
 } pc;
 
+layout(set = 1, binding = 0) uniform LightParams {
+    vec4 uPositionEnabled;
+    vec4 uDirection;
+    vec4 uColorIntensity;
+    vec4 uParams;
+    mat4 uViewProjection;
+    vec4 uSunDirectionEnabled;
+    vec4 uSunColorIntensity;
+    vec4 uSunParams;
+    mat4 uSunViewProjection;
+} light;
+
 layout(location = 0) out vec3 vWorldNormal;
 layout(location = 1) out vec2 vUv;
 layout(location = 2) out vec4 vClipPos;
 layout(location = 3) out vec4 vPrevClipPos;
+layout(location = 4) out vec3 vWorldPos;
+layout(location = 5) out vec4 vShadowClipPos;
+layout(location = 6) out vec4 vSunShadowClipPos;
 
 vec4 toVulkanClip(vec4 clipPos) {
     clipPos.y = -clipPos.y;
@@ -44,5 +59,8 @@ void main() {
     vec4 prevClipPos = toVulkanClip(pc.uPrevMVP * worldPos);
     vClipPos = clipPos;
     vPrevClipPos = prevClipPos;
+    vWorldPos = worldPos.xyz;
+    vShadowClipPos = toVulkanClip(light.uViewProjection * worldPos);
+    vSunShadowClipPos = toVulkanClip(light.uSunViewProjection * worldPos);
     gl_Position = clipPos;
 }

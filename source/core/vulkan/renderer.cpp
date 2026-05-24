@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +41,7 @@ namespace rose::core::vulkan
     {
         constexpr uint32_t k_api_version          = VK_API_VERSION_1_2;
         constexpr int      k_max_frames_in_flight = 2;
+        constexpr uint32_t k_shadow_map_size      = 2048;
 
         class VulkanError final : public std::runtime_error
         {
@@ -293,6 +295,7 @@ namespace rose::core::vulkan
         {
             BufferResource vertex_buffer;
             BufferResource index_buffer;
+            BufferResource material_buffer;
             uint32_t index_count = 0;
             VkDescriptorSet descriptor = VK_NULL_HANDLE;
             omath::Vector3<float> local_center{};
@@ -333,6 +336,46 @@ namespace rose::core::vulkan
             float intensity = 0.0f;
             float radius = 1.0f;
             int32_t quality = 1;
+        };
+
+        struct MaterialUniform final
+        {
+            float base_color_factor[4]{1.0f, 1.0f, 1.0f, 1.0f};
+            float emissive_factor[4]{0.0f, 0.0f, 0.0f, 0.0f};
+            float metallic_factor = 0.0f;
+            float roughness_factor = 0.8f;
+            float normal_scale = 1.0f;
+            float padding = 0.0f;
+        };
+
+        struct LightUniform final
+        {
+            float position[4]{};
+            float direction[4]{};
+            float color_intensity[4]{};
+            float params[4]{};
+            float view_projection[16]{};
+            float sun_direction_enabled[4]{};
+            float sun_color_intensity[4]{};
+            float sun_params[4]{};
+            float sun_view_projection[16]{};
+        };
+
+        struct QueuedDrawCall final
+        {
+            const Mesh* mesh = nullptr;
+            const omath::opengl_engine::Camera* camera = nullptr;
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            std::array<float, 3> outline_color{};
+            float outline_width = 0.0f;
+            float outline_alpha = 0.0f;
+            bool outline_enabled = false;
+        };
+
+        enum class ShadowPassKind
+        {
+            Spotlight,
+            Sun
         };
 
         [[nodiscard]] const char* dlss_quality_label(DlssQuality quality) noexcept
@@ -544,27 +587,37 @@ namespace rose::core::vulkan
         bool m_swapchain_supports_transfer_dst = false;
 
         VkRenderPass m_render_pass = VK_NULL_HANDLE;
+        VkRenderPass m_shadow_render_pass = VK_NULL_HANDLE;
         VkRenderPass m_present_render_pass = VK_NULL_HANDLE;
         VkDescriptorSetLayout m_descriptor_set_layout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout m_light_descriptor_set_layout = VK_NULL_HANDLE;
         VkDescriptorSetLayout m_post_descriptor_set_layout = VK_NULL_HANDLE;
         VkPipelineLayout m_pipeline_layout = VK_NULL_HANDLE;
         VkPipelineLayout m_bloom_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline m_graphics_pipeline = VK_NULL_HANDLE;
         VkPipeline m_outline_pipeline = VK_NULL_HANDLE;
+        VkPipeline m_shadow_pipeline = VK_NULL_HANDLE;
         VkPipeline m_bloom_pipeline = VK_NULL_HANDLE;
         VkDescriptorPool m_descriptor_pool = VK_NULL_HANDLE;
         VkDescriptorSet m_bloom_descriptor_set = VK_NULL_HANDLE;
         VkImageView m_bloom_descriptor_image_view = VK_NULL_HANDLE;
         VkSampler m_bloom_sampler = VK_NULL_HANDLE;
+        VkSampler m_shadow_sampler = VK_NULL_HANDLE;
+        std::array<BufferResource, k_max_frames_in_flight> m_light_buffers{};
+        std::array<VkDescriptorSet, k_max_frames_in_flight> m_light_descriptor_sets{};
 
         VkCommandPool m_command_pool = VK_NULL_HANDLE;
         std::vector<VkCommandBuffer> m_command_buffers;
         std::vector<VkFramebuffer> m_framebuffers;
         VkFramebuffer m_scene_framebuffer = VK_NULL_HANDLE;
+        VkFramebuffer m_shadow_framebuffer = VK_NULL_HANDLE;
+        VkFramebuffer m_sun_shadow_framebuffer = VK_NULL_HANDLE;
         ImageResource m_scene_color_image;
         ImageResource m_motion_vector_image;
         ImageResource m_dlss_output_image;
         ImageResource m_depth_image;
+        ImageResource m_shadow_image;
+        ImageResource m_sun_shadow_image;
         VkFormat m_depth_format = VK_FORMAT_UNDEFINED;
         VkFormat m_scene_color_format = VK_FORMAT_R8G8B8A8_UNORM;
         VkFormat m_motion_vector_format = VK_FORMAT_R16G16_SFLOAT;
@@ -577,13 +630,20 @@ namespace rose::core::vulkan
         uint32_t m_active_image_index = 0;
         VkCommandBuffer m_active_command_buffer = VK_NULL_HANDLE;
         bool m_frame_started = false;
+        bool m_shadow_render_pass_active = false;
+        ShadowPassKind m_active_shadow_pass = ShadowPassKind::Spotlight;
         bool m_scene_render_pass_active = false;
         bool m_present_render_pass_active = false;
+        std::vector<QueuedDrawCall> m_queued_draw_calls;
 
         std::unordered_map<const Texture*, GpuTexture> m_texture_resources;
         std::unordered_map<const Mesh*, GpuMesh> m_mesh_resources;
         GpuTexture m_default_texture;
+        GpuTexture m_default_normal_texture;
+        GpuTexture m_default_emissive_texture;
         bool m_default_texture_created = false;
+        bool m_default_normal_texture_created = false;
+        bool m_default_emissive_texture_created = false;
 
         std::array<float, 16> m_previous_view_projection{};
         std::array<float, 16> m_frame_view_projection{};
@@ -598,6 +658,10 @@ namespace rose::core::vulkan
         bool m_dlss_reset_next_frame = true;
         SelectionOutlineSettings m_selection_outline_settings{};
         BloomSettings m_bloom_settings{};
+        SpotlightSettings m_spotlight_settings{};
+        SunSettings m_sun_settings{};
+        std::array<float, 16> m_light_view_projection{};
+        std::array<float, 16> m_sun_view_projection{};
 
         std::vector<std::string> m_ngx_instance_extensions;
         std::vector<std::string> m_ngx_device_extensions;
@@ -640,6 +704,7 @@ namespace rose::core::vulkan
             create_image_views();
             create_render_pass();
             create_descriptor_set_layout();
+            create_light_resources();
             create_graphics_pipeline();
             create_render_targets();
             create_framebuffers();
@@ -659,12 +724,15 @@ namespace rose::core::vulkan
 
             destroy_gpu_resources();
             cleanup_swapchain();
+            destroy_light_resources();
             shutdown_dlss_sdk();
 
             if (m_graphics_pipeline != VK_NULL_HANDLE)
                 vkDestroyPipeline(m_device, m_graphics_pipeline, nullptr);
             if (m_outline_pipeline != VK_NULL_HANDLE)
                 vkDestroyPipeline(m_device, m_outline_pipeline, nullptr);
+            if (m_shadow_pipeline != VK_NULL_HANDLE)
+                vkDestroyPipeline(m_device, m_shadow_pipeline, nullptr);
             if (m_bloom_pipeline != VK_NULL_HANDLE)
                 vkDestroyPipeline(m_device, m_bloom_pipeline, nullptr);
             if (m_pipeline_layout != VK_NULL_HANDLE)
@@ -673,10 +741,16 @@ namespace rose::core::vulkan
                 vkDestroyPipelineLayout(m_device, m_bloom_pipeline_layout, nullptr);
             if (m_descriptor_set_layout != VK_NULL_HANDLE)
                 vkDestroyDescriptorSetLayout(m_device, m_descriptor_set_layout, nullptr);
+            if (m_light_descriptor_set_layout != VK_NULL_HANDLE)
+                vkDestroyDescriptorSetLayout(m_device, m_light_descriptor_set_layout, nullptr);
             if (m_post_descriptor_set_layout != VK_NULL_HANDLE)
                 vkDestroyDescriptorSetLayout(m_device, m_post_descriptor_set_layout, nullptr);
             if (m_bloom_sampler != VK_NULL_HANDLE)
                 vkDestroySampler(m_device, m_bloom_sampler, nullptr);
+            if (m_shadow_sampler != VK_NULL_HANDLE)
+                vkDestroySampler(m_device, m_shadow_sampler, nullptr);
+            if (m_shadow_render_pass != VK_NULL_HANDLE)
+                vkDestroyRenderPass(m_device, m_shadow_render_pass, nullptr);
             if (m_render_pass != VK_NULL_HANDLE)
                 vkDestroyRenderPass(m_device, m_render_pass, nullptr);
             if (m_present_render_pass != VK_NULL_HANDLE)
@@ -704,36 +778,48 @@ namespace rose::core::vulkan
                 vkDestroyInstance(m_instance, nullptr);
         }
 
-        [[nodiscard]] bool begin_frame()
+        void begin_shadow_render_pass(ShadowPassKind pass_kind)
         {
-            FrameSync& frame = m_frames[m_current_frame];
-            check_vk(vkWaitForFences(m_device, 1, &frame.in_flight, VK_TRUE, UINT64_MAX), "Failed to wait for frame fence");
-            collect_completed_readback(m_current_frame);
+            const VkClearValue clear_value{.depthStencil = {1.0f, 0}};
+            const VkFramebuffer framebuffer = pass_kind == ShadowPassKind::Sun
+                ? m_sun_shadow_framebuffer
+                : m_shadow_framebuffer;
 
-            VkResult result = vkAcquireNextImageKHR(
-                m_device, m_swapchain, UINT64_MAX, frame.image_available, VK_NULL_HANDLE, &m_active_image_index);
-            if (result == VK_ERROR_OUT_OF_DATE_KHR)
-            {
-                recreate_swapchain();
-                return false;
-            }
-            if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
-                check_vk(result, "Failed to acquire swapchain image");
+            VkRenderPassBeginInfo render_pass_info{};
+            render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            render_pass_info.renderPass = m_shadow_render_pass;
+            render_pass_info.framebuffer = framebuffer;
+            render_pass_info.renderArea.offset = {0, 0};
+            render_pass_info.renderArea.extent = {k_shadow_map_size, k_shadow_map_size};
+            render_pass_info.clearValueCount = 1;
+            render_pass_info.pClearValues = &clear_value;
 
-            if (m_images_in_flight[m_active_image_index] != VK_NULL_HANDLE)
-                check_vk(vkWaitForFences(m_device, 1, &m_images_in_flight[m_active_image_index], VK_TRUE, UINT64_MAX),
-                         "Failed to wait for swapchain image fence");
-            m_images_in_flight[m_active_image_index] = frame.in_flight;
+            vkCmdBeginRenderPass(m_active_command_buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(m_active_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadow_pipeline);
 
-            check_vk(vkResetFences(m_device, 1, &frame.in_flight), "Failed to reset frame fence");
+            VkViewport viewport{};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = static_cast<float>(k_shadow_map_size);
+            viewport.height = static_cast<float>(k_shadow_map_size);
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+            vkCmdSetViewport(m_active_command_buffer, 0, 1, &viewport);
 
-            m_active_command_buffer = m_command_buffers[m_active_image_index];
-            check_vk(vkResetCommandBuffer(m_active_command_buffer, 0), "Failed to reset command buffer");
+            const VkRect2D scissor{{0, 0}, {k_shadow_map_size, k_shadow_map_size}};
+            vkCmdSetScissor(m_active_command_buffer, 0, 1, &scissor);
 
-            VkCommandBufferBeginInfo begin_info{};
-            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            check_vk(vkBeginCommandBuffer(m_active_command_buffer, &begin_info), "Failed to begin command buffer");
+            m_shadow_render_pass_active = true;
+            m_active_shadow_pass = pass_kind;
+            m_scene_render_pass_active = false;
+            if (pass_kind == ShadowPassKind::Sun)
+                m_sun_shadow_image.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            else
+                m_shadow_image.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
 
+        void begin_scene_render_pass()
+        {
             const std::array<VkClearValue, 3> clear_values{
                 VkClearValue{.color = {{0.3f, 0.3f, 0.3f, 1.0f}}},
                 VkClearValue{.color = {{0.0f, 0.0f, 0.0f, 0.0f}}},
@@ -764,10 +850,45 @@ namespace rose::core::vulkan
             const VkRect2D scissor{{0, 0}, m_scene_extent};
             vkCmdSetScissor(m_active_command_buffer, 0, 1, &scissor);
 
-            m_frame_started = true;
             m_scene_render_pass_active = true;
-            m_present_render_pass_active = false;
             m_frame_view_projection_set = false;
+        }
+
+        [[nodiscard]] bool begin_frame()
+        {
+            FrameSync& frame = m_frames[m_current_frame];
+            check_vk(vkWaitForFences(m_device, 1, &frame.in_flight, VK_TRUE, UINT64_MAX), "Failed to wait for frame fence");
+            collect_completed_readback(m_current_frame);
+            m_queued_draw_calls.clear();
+
+            VkResult result = vkAcquireNextImageKHR(
+                m_device, m_swapchain, UINT64_MAX, frame.image_available, VK_NULL_HANDLE, &m_active_image_index);
+            if (result == VK_ERROR_OUT_OF_DATE_KHR)
+            {
+                recreate_swapchain();
+                return false;
+            }
+            if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+                check_vk(result, "Failed to acquire swapchain image");
+
+            if (m_images_in_flight[m_active_image_index] != VK_NULL_HANDLE)
+                check_vk(vkWaitForFences(m_device, 1, &m_images_in_flight[m_active_image_index], VK_TRUE, UINT64_MAX),
+                         "Failed to wait for swapchain image fence");
+            m_images_in_flight[m_active_image_index] = frame.in_flight;
+
+            check_vk(vkResetFences(m_device, 1, &frame.in_flight), "Failed to reset frame fence");
+
+            m_active_command_buffer = m_command_buffers[m_active_image_index];
+            check_vk(vkResetCommandBuffer(m_active_command_buffer, 0), "Failed to reset command buffer");
+
+            VkCommandBufferBeginInfo begin_info{};
+            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            check_vk(vkBeginCommandBuffer(m_active_command_buffer, &begin_info), "Failed to begin command buffer");
+            update_light_buffer(m_current_frame);
+            begin_shadow_render_pass(ShadowPassKind::Spotlight);
+
+            m_frame_started = true;
+            m_present_render_pass_active = false;
             return true;
         }
 
@@ -819,14 +940,38 @@ namespace rose::core::vulkan
         {
             if (!m_frame_started)
                 throw VulkanError("draw_mesh() called outside a frame");
-            if (!m_scene_render_pass_active)
-                throw VulkanError("draw_mesh() called after scene rendering finished");
 
             GpuMesh& gpu_mesh = ensure_mesh_resource(mesh);
             if (gpu_mesh.index_count == 0)
                 return;
 
-            vkCmdBindPipeline(m_active_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            if (m_shadow_render_pass_active)
+            {
+                if (!outline_enabled)
+                    draw_shadow_mesh(mesh, gpu_mesh);
+                m_queued_draw_calls.push_back({&mesh,
+                                               &camera,
+                                               pipeline,
+                                               outline_color,
+                                               outline_width,
+                                               outline_alpha,
+                                               outline_enabled});
+                return;
+            }
+
+            draw_scene_mesh_with_pipeline(mesh,
+                                          camera,
+                                          gpu_mesh,
+                                          pipeline,
+                                          outline_color,
+                                          outline_width,
+                                          outline_alpha,
+                                          outline_enabled);
+        }
+
+        void draw_shadow_mesh(const Mesh& mesh, const GpuMesh& gpu_mesh)
+        {
+            vkCmdBindPipeline(m_active_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadow_pipeline);
 
             const VkBuffer vertex_buffers[] = {gpu_mesh.vertex_buffer.buffer};
             const VkDeviceSize offsets[] = {0};
@@ -835,9 +980,59 @@ namespace rose::core::vulkan
             vkCmdBindDescriptorSets(m_active_command_buffer,
                                     VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     m_pipeline_layout,
-                                    0,
                                     1,
-                                    &gpu_mesh.descriptor,
+                                    1,
+                                    &m_light_descriptor_sets[m_current_frame],
+                                    0,
+                                    nullptr);
+
+            PushConstants push{};
+            const auto model = mesh.cpu_mesh().get_to_world_matrix().raw_array();
+            const std::array<float, 16>& shadow_view_projection =
+                m_active_shadow_pass == ShadowPassKind::Sun ? m_sun_view_projection : m_light_view_projection;
+            std::memcpy(push.view_projection, shadow_view_projection.data(), sizeof(push.view_projection));
+            std::memcpy(push.model, model.data(), sizeof(push.model));
+            std::memcpy(push.previous_view_projection,
+                        shadow_view_projection.data(),
+                        sizeof(push.previous_view_projection));
+            vkCmdPushConstants(m_active_command_buffer,
+                               m_pipeline_layout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0,
+                               sizeof(PushConstants),
+                               &push);
+
+            vkCmdDrawIndexed(m_active_command_buffer, gpu_mesh.index_count, 1, 0, 0, 0);
+        }
+
+        void draw_scene_mesh_with_pipeline(const Mesh& mesh,
+                                           const omath::opengl_engine::Camera& camera,
+                                           const GpuMesh& gpu_mesh,
+                                           VkPipeline pipeline,
+                                           const std::array<float, 3>& outline_color,
+                                           float outline_width,
+                                           float outline_alpha,
+                                           bool outline_enabled)
+        {
+            if (!m_scene_render_pass_active)
+                throw VulkanError("draw_mesh() called after scene rendering finished");
+
+            vkCmdBindPipeline(m_active_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+            const VkBuffer vertex_buffers[] = {gpu_mesh.vertex_buffer.buffer};
+            const VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(m_active_command_buffer, 0, 1, vertex_buffers, offsets);
+            vkCmdBindIndexBuffer(m_active_command_buffer, gpu_mesh.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+            const std::array<VkDescriptorSet, 2> descriptor_sets{
+                gpu_mesh.descriptor,
+                m_light_descriptor_sets[m_current_frame]
+            };
+            vkCmdBindDescriptorSets(m_active_command_buffer,
+                                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_pipeline_layout,
+                                    0,
+                                    static_cast<uint32_t>(descriptor_sets.size()),
+                                    descriptor_sets.data(),
                                     0,
                                     nullptr);
 
@@ -855,9 +1050,11 @@ namespace rose::core::vulkan
             const std::array<float, 16>& previous_vp =
                 m_previous_view_projection_valid ? m_previous_view_projection : m_frame_view_projection;
             std::memcpy(push.previous_view_projection, previous_vp.data(), sizeof(push.previous_view_projection));
-            push.outline_center[0] = gpu_mesh.local_center.x;
-            push.outline_center[1] = gpu_mesh.local_center.y;
-            push.outline_center[2] = gpu_mesh.local_center.z;
+            const omath::Vector3<float>& camera_origin = camera.get_origin();
+            const omath::Vector3<float>& aux_position = outline_enabled ? gpu_mesh.local_center : camera_origin;
+            push.outline_center[0] = aux_position.x;
+            push.outline_center[1] = aux_position.y;
+            push.outline_center[2] = aux_position.z;
             push.outline_width = outline_width;
             push.outline_color[0] = outline_color[0];
             push.outline_color[1] = outline_color[1];
@@ -1212,6 +1409,16 @@ namespace rose::core::vulkan
                 vkDestroyFramebuffer(m_device, m_scene_framebuffer, nullptr);
                 m_scene_framebuffer = VK_NULL_HANDLE;
             }
+            if (m_shadow_framebuffer != VK_NULL_HANDLE)
+            {
+                vkDestroyFramebuffer(m_device, m_shadow_framebuffer, nullptr);
+                m_shadow_framebuffer = VK_NULL_HANDLE;
+            }
+            if (m_sun_shadow_framebuffer != VK_NULL_HANDLE)
+            {
+                vkDestroyFramebuffer(m_device, m_sun_shadow_framebuffer, nullptr);
+                m_sun_shadow_framebuffer = VK_NULL_HANDLE;
+            }
 
             release_dlss_feature();
             m_bloom_descriptor_image_view = VK_NULL_HANDLE;
@@ -1219,6 +1426,8 @@ namespace rose::core::vulkan
             destroy_image(m_motion_vector_image);
             destroy_image(m_scene_color_image);
             destroy_image(m_depth_image);
+            destroy_image(m_shadow_image);
+            destroy_image(m_sun_shadow_image);
         }
 
         void recreate_frame_targets()
@@ -1282,6 +1491,141 @@ namespace rose::core::vulkan
             m_bloom_settings.intensity = std::clamp(m_bloom_settings.intensity, 0.0f, 5.0f);
             m_bloom_settings.radius = std::clamp(m_bloom_settings.radius, 0.0f, 32.0f);
             m_bloom_settings.quality = std::clamp(m_bloom_settings.quality, 1, 64);
+        }
+
+        void set_spotlight_settings(const SpotlightSettings& settings)
+        {
+            m_spotlight_settings = settings;
+            for (float& channel : m_spotlight_settings.color)
+                channel = std::clamp(channel, 0.0f, 1.0f);
+            m_spotlight_settings.intensity = std::clamp(m_spotlight_settings.intensity, 0.0f, 1000.0f);
+            m_spotlight_settings.range = std::clamp(m_spotlight_settings.range, 0.1f, 500.0f);
+            m_spotlight_settings.inner_angle_degrees =
+                std::clamp(m_spotlight_settings.inner_angle_degrees, 0.1f, 89.0f);
+            m_spotlight_settings.outer_angle_degrees =
+                std::clamp(m_spotlight_settings.outer_angle_degrees,
+                           m_spotlight_settings.inner_angle_degrees + 0.1f,
+                           89.9f);
+
+            const float length = std::sqrt(m_spotlight_settings.direction.x * m_spotlight_settings.direction.x
+                                         + m_spotlight_settings.direction.y * m_spotlight_settings.direction.y
+                                         + m_spotlight_settings.direction.z * m_spotlight_settings.direction.z);
+            if (length > 0.0001f)
+                m_spotlight_settings.direction = m_spotlight_settings.direction / length;
+            else
+                m_spotlight_settings.direction = {0.0f, 0.0f, -1.0f};
+        }
+
+        void set_sun_settings(const SunSettings& settings)
+        {
+            m_sun_settings = settings;
+            for (float& channel : m_sun_settings.color)
+                channel = std::clamp(channel, 0.0f, 1.0f);
+            m_sun_settings.intensity = std::clamp(m_sun_settings.intensity, 0.0f, 50.0f);
+            m_sun_settings.shadow_distance = std::clamp(m_sun_settings.shadow_distance, 5.0f, 500.0f);
+
+            const float length = std::sqrt(m_sun_settings.direction.x * m_sun_settings.direction.x
+                                         + m_sun_settings.direction.y * m_sun_settings.direction.y
+                                         + m_sun_settings.direction.z * m_sun_settings.direction.z);
+            if (length > 0.0001f)
+                m_sun_settings.direction = m_sun_settings.direction / length;
+            else
+                m_sun_settings.direction = {-0.35f, -0.75f, -0.45f};
+        }
+
+        [[nodiscard]] std::array<float, 16> compute_sun_view_projection() const
+        {
+            omath::Vector3<float> direction = m_sun_settings.direction;
+            const float length = std::sqrt(direction.x * direction.x
+                                         + direction.y * direction.y
+                                         + direction.z * direction.z);
+            if (length > 0.0001f)
+                direction = direction / length;
+            else
+                direction = {-0.35f, -0.75f, -0.45f};
+
+            const float half_extent = m_sun_settings.shadow_distance;
+            const float far_plane = half_extent * 2.5f;
+            const omath::Vector3<float> eye = -direction * half_extent;
+            const omath::Vector3<float> target{0.0f, 0.0f, 0.0f};
+            const omath::Vector3<float> up = std::abs(direction.y) > 0.92f
+                ? omath::Vector3<float>{0.0f, 0.0f, 1.0f}
+                : omath::Vector3<float>{0.0f, 1.0f, 0.0f};
+
+            const auto projection =
+                omath::mat_ortho_right_handed<float, omath::MatStoreType::COLUMN_MAJOR>(
+                    -half_extent,
+                    half_extent,
+                    -half_extent,
+                    half_extent,
+                    0.05f,
+                    far_plane);
+            const auto view =
+                omath::mat_look_at_right_handed<float, omath::MatStoreType::COLUMN_MAJOR>(eye, target, up);
+            return (projection * view).raw_array();
+        }
+
+        void update_light_buffer(std::size_t frame_index)
+        {
+            constexpr float pi = 3.14159265358979323846f;
+            constexpr float radians_per_degree = pi / 180.0f;
+
+            const float inner_cos = std::cos(m_spotlight_settings.inner_angle_degrees * radians_per_degree);
+            const float outer_cos = std::cos(m_spotlight_settings.outer_angle_degrees * radians_per_degree);
+            const float light_fov = std::clamp(m_spotlight_settings.outer_angle_degrees * 2.0f, 1.0f, 170.0f);
+            omath::opengl_engine::Camera light_camera{
+                m_spotlight_settings.position,
+                {},
+                {static_cast<float>(k_shadow_map_size), static_cast<float>(k_shadow_map_size)},
+                omath::projection::FieldOfView::from_degrees(light_fov),
+                0.05f,
+                m_spotlight_settings.range
+            };
+            light_camera.look_at(m_spotlight_settings.position + m_spotlight_settings.direction);
+            m_light_view_projection = light_camera.get_view_projection_matrix().raw_array();
+            m_sun_view_projection = compute_sun_view_projection();
+
+            LightUniform uniform{};
+            uniform.position[0] = m_spotlight_settings.position.x;
+            uniform.position[1] = m_spotlight_settings.position.y;
+            uniform.position[2] = m_spotlight_settings.position.z;
+            uniform.position[3] = m_spotlight_settings.enabled ? 1.0f : 0.0f;
+            uniform.direction[0] = m_spotlight_settings.direction.x;
+            uniform.direction[1] = m_spotlight_settings.direction.y;
+            uniform.direction[2] = m_spotlight_settings.direction.z;
+            uniform.color_intensity[0] = m_spotlight_settings.color[0];
+            uniform.color_intensity[1] = m_spotlight_settings.color[1];
+            uniform.color_intensity[2] = m_spotlight_settings.color[2];
+            uniform.color_intensity[3] = m_spotlight_settings.intensity;
+            uniform.params[0] = inner_cos;
+            uniform.params[1] = outer_cos;
+            uniform.params[2] = m_spotlight_settings.range;
+            uniform.params[3] = 0.0025f;
+            std::memcpy(uniform.view_projection, m_light_view_projection.data(), sizeof(uniform.view_projection));
+            uniform.sun_direction_enabled[0] = m_sun_settings.direction.x;
+            uniform.sun_direction_enabled[1] = m_sun_settings.direction.y;
+            uniform.sun_direction_enabled[2] = m_sun_settings.direction.z;
+            uniform.sun_direction_enabled[3] = m_sun_settings.enabled ? 1.0f : 0.0f;
+            uniform.sun_color_intensity[0] = m_sun_settings.color[0];
+            uniform.sun_color_intensity[1] = m_sun_settings.color[1];
+            uniform.sun_color_intensity[2] = m_sun_settings.color[2];
+            uniform.sun_color_intensity[3] = m_sun_settings.intensity;
+            uniform.sun_params[0] = 0.0035f;
+            uniform.sun_params[1] = m_sun_settings.shadow_distance;
+            std::memcpy(uniform.sun_view_projection,
+                        m_sun_view_projection.data(),
+                        sizeof(uniform.sun_view_projection));
+
+            void* mapped = nullptr;
+            check_vk(vkMapMemory(m_device,
+                                  m_light_buffers[frame_index].memory,
+                                  0,
+                                  sizeof(LightUniform),
+                                  0,
+                                  &mapped),
+                     "Failed to map light buffer");
+            std::memcpy(mapped, &uniform, sizeof(LightUniform));
+            vkUnmapMemory(m_device, m_light_buffers[frame_index].memory);
         }
 
         void create_instance()
@@ -1840,6 +2184,49 @@ namespace rose::core::vulkan
 
             check_vk(vkCreateRenderPass(m_device, &render_pass_info, nullptr, &m_render_pass), "Failed to create render pass");
 
+            VkAttachmentDescription shadow_attachment{};
+            shadow_attachment.format = m_depth_format;
+            shadow_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+            shadow_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            shadow_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            shadow_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            shadow_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            shadow_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            shadow_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+            const VkAttachmentReference shadow_attachment_ref{0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+            VkSubpassDescription shadow_subpass{};
+            shadow_subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            shadow_subpass.pDepthStencilAttachment = &shadow_attachment_ref;
+
+            std::array<VkSubpassDependency, 2> shadow_dependencies{};
+            shadow_dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+            shadow_dependencies[0].dstSubpass = 0;
+            shadow_dependencies[0].srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            shadow_dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                                                | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            shadow_dependencies[0].srcAccessMask = 0;
+            shadow_dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            shadow_dependencies[1].srcSubpass = 0;
+            shadow_dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+            shadow_dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            shadow_dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            shadow_dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            shadow_dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+            VkRenderPassCreateInfo shadow_render_pass_info{};
+            shadow_render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+            shadow_render_pass_info.attachmentCount = 1;
+            shadow_render_pass_info.pAttachments = &shadow_attachment;
+            shadow_render_pass_info.subpassCount = 1;
+            shadow_render_pass_info.pSubpasses = &shadow_subpass;
+            shadow_render_pass_info.dependencyCount = static_cast<uint32_t>(shadow_dependencies.size());
+            shadow_render_pass_info.pDependencies = shadow_dependencies.data();
+
+            check_vk(vkCreateRenderPass(m_device, &shadow_render_pass_info, nullptr, &m_shadow_render_pass),
+                     "Failed to create shadow render pass");
+
             VkAttachmentDescription present_attachment{};
             present_attachment.format = m_swapchain_image_format;
             present_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1897,19 +2284,57 @@ namespace rose::core::vulkan
 
         void create_descriptor_set_layout()
         {
-            VkDescriptorSetLayoutBinding sampler_layout_binding{};
-            sampler_layout_binding.binding = 0;
-            sampler_layout_binding.descriptorCount = 1;
-            sampler_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            sampler_layout_binding.pImmutableSamplers = nullptr;
-            sampler_layout_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            std::array<VkDescriptorSetLayoutBinding, 5> material_bindings{};
+            for (uint32_t binding = 0; binding < 4; ++binding)
+            {
+                material_bindings[binding].binding = binding;
+                material_bindings[binding].descriptorCount = 1;
+                material_bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                material_bindings[binding].pImmutableSamplers = nullptr;
+                material_bindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            }
+            material_bindings[4].binding = 4;
+            material_bindings[4].descriptorCount = 1;
+            material_bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            material_bindings[4].pImmutableSamplers = nullptr;
+            material_bindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
             VkDescriptorSetLayoutCreateInfo layout_info{};
             layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            layout_info.bindingCount = 1;
-            layout_info.pBindings = &sampler_layout_binding;
+            layout_info.bindingCount = static_cast<uint32_t>(material_bindings.size());
+            layout_info.pBindings = material_bindings.data();
             check_vk(vkCreateDescriptorSetLayout(m_device, &layout_info, nullptr, &m_descriptor_set_layout),
                      "Failed to create descriptor set layout");
+
+            VkDescriptorSetLayoutBinding light_layout_binding{};
+            light_layout_binding.binding = 0;
+            light_layout_binding.descriptorCount = 1;
+            light_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            light_layout_binding.pImmutableSamplers = nullptr;
+            light_layout_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+            VkDescriptorSetLayoutBinding shadow_layout_binding{};
+            shadow_layout_binding.binding = 1;
+            shadow_layout_binding.descriptorCount = 1;
+            shadow_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            shadow_layout_binding.pImmutableSamplers = nullptr;
+            shadow_layout_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+            VkDescriptorSetLayoutBinding sun_shadow_layout_binding = shadow_layout_binding;
+            sun_shadow_layout_binding.binding = 2;
+
+            const std::array<VkDescriptorSetLayoutBinding, 3> light_bindings{
+                light_layout_binding,
+                shadow_layout_binding,
+                sun_shadow_layout_binding
+            };
+
+            VkDescriptorSetLayoutCreateInfo light_layout_info{};
+            light_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            light_layout_info.bindingCount = static_cast<uint32_t>(light_bindings.size());
+            light_layout_info.pBindings = light_bindings.data();
+            check_vk(vkCreateDescriptorSetLayout(m_device, &light_layout_info, nullptr, &m_light_descriptor_set_layout),
+                     "Failed to create light descriptor set layout");
 
             VkDescriptorSetLayoutBinding post_sampler_layout_binding{};
             post_sampler_layout_binding.binding = 0;
@@ -1940,6 +2365,17 @@ namespace rose::core::vulkan
             check_vk(vkCreateSampler(m_device, &sampler_info, nullptr, &m_bloom_sampler),
                      "Failed to create bloom sampler");
 
+            VkSamplerCreateInfo shadow_sampler_info = sampler_info;
+            shadow_sampler_info.magFilter = VK_FILTER_LINEAR;
+            shadow_sampler_info.minFilter = VK_FILTER_LINEAR;
+            shadow_sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            shadow_sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            shadow_sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            shadow_sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+            shadow_sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            check_vk(vkCreateSampler(m_device, &shadow_sampler_info, nullptr, &m_shadow_sampler),
+                     "Failed to create shadow sampler");
+
             VkDescriptorSetAllocateInfo alloc_info{};
             alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
             alloc_info.descriptorPool = m_descriptor_pool;
@@ -1948,6 +2384,84 @@ namespace rose::core::vulkan
             check_vk(vkAllocateDescriptorSets(m_device, &alloc_info, &m_bloom_descriptor_set),
                      "Failed to allocate bloom descriptor set");
             spdlog::info("Vulkan: descriptor set layouts created");
+        }
+
+        void create_light_resources()
+        {
+            for (std::size_t i = 0; i < m_light_buffers.size(); ++i)
+            {
+                create_buffer(sizeof(LightUniform),
+                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              m_light_buffers[i]);
+
+                VkDescriptorSetAllocateInfo alloc_info{};
+                alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                alloc_info.descriptorPool = m_descriptor_pool;
+                alloc_info.descriptorSetCount = 1;
+                alloc_info.pSetLayouts = &m_light_descriptor_set_layout;
+                check_vk(vkAllocateDescriptorSets(m_device, &alloc_info, &m_light_descriptor_sets[i]),
+                         "Failed to allocate light descriptor set");
+
+                VkDescriptorBufferInfo buffer_info{};
+                buffer_info.buffer = m_light_buffers[i].buffer;
+                buffer_info.offset = 0;
+                buffer_info.range = sizeof(LightUniform);
+
+                VkWriteDescriptorSet descriptor_write{};
+                descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptor_write.dstSet = m_light_descriptor_sets[i];
+                descriptor_write.dstBinding = 0;
+                descriptor_write.dstArrayElement = 0;
+                descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                descriptor_write.descriptorCount = 1;
+                descriptor_write.pBufferInfo = &buffer_info;
+
+                vkUpdateDescriptorSets(m_device, 1, &descriptor_write, 0, nullptr);
+            }
+        }
+
+        void destroy_light_resources() noexcept
+        {
+            for (BufferResource& buffer : m_light_buffers)
+                destroy_buffer(buffer);
+            m_light_descriptor_sets = {};
+        }
+
+        void update_light_shadow_descriptors() const
+        {
+            if (m_shadow_image.view == VK_NULL_HANDLE || m_sun_shadow_image.view == VK_NULL_HANDLE)
+                return;
+
+            VkDescriptorImageInfo shadow_image_info{};
+            shadow_image_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            shadow_image_info.imageView = m_shadow_image.view;
+            shadow_image_info.sampler = m_shadow_sampler;
+
+            VkDescriptorImageInfo sun_shadow_image_info = shadow_image_info;
+            sun_shadow_image_info.imageView = m_sun_shadow_image.view;
+
+            std::array<VkWriteDescriptorSet, k_max_frames_in_flight * 2> descriptor_writes{};
+            for (std::size_t i = 0; i < k_max_frames_in_flight; ++i)
+            {
+                descriptor_writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptor_writes[i].dstSet = m_light_descriptor_sets[i];
+                descriptor_writes[i].dstBinding = 1;
+                descriptor_writes[i].dstArrayElement = 0;
+                descriptor_writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                descriptor_writes[i].descriptorCount = 1;
+                descriptor_writes[i].pImageInfo = &shadow_image_info;
+
+                descriptor_writes[i + k_max_frames_in_flight] = descriptor_writes[i];
+                descriptor_writes[i + k_max_frames_in_flight].dstBinding = 2;
+                descriptor_writes[i + k_max_frames_in_flight].pImageInfo = &sun_shadow_image_info;
+            }
+
+            vkUpdateDescriptorSets(m_device,
+                                   static_cast<uint32_t>(descriptor_writes.size()),
+                                   descriptor_writes.data(),
+                                   0,
+                                   nullptr);
         }
 
         void create_graphics_pipeline()
@@ -2061,10 +2575,15 @@ namespace rose::core::vulkan
             if (device_properties.limits.maxPushConstantsSize < static_cast<uint32_t>(sizeof(PushConstants)))
                 throw VulkanError("Vulkan device does not support the push constant size required for motion vectors");
 
+            const std::array<VkDescriptorSetLayout, 2> mesh_set_layouts{
+                m_descriptor_set_layout,
+                m_light_descriptor_set_layout
+            };
+
             VkPipelineLayoutCreateInfo pipeline_layout_info{};
             pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            pipeline_layout_info.setLayoutCount = 1;
-            pipeline_layout_info.pSetLayouts = &m_descriptor_set_layout;
+            pipeline_layout_info.setLayoutCount = static_cast<uint32_t>(mesh_set_layouts.size());
+            pipeline_layout_info.pSetLayouts = mesh_set_layouts.data();
             pipeline_layout_info.pushConstantRangeCount = 1;
             pipeline_layout_info.pPushConstantRanges = &push_constant_range;
 
@@ -2122,6 +2641,38 @@ namespace rose::core::vulkan
 
             check_vk(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &m_outline_pipeline),
                      "Failed to create outline pipeline");
+
+            VkPipelineRasterizationStateCreateInfo shadow_rasterizer = rasterizer;
+            shadow_rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+            shadow_rasterizer.depthBiasEnable = VK_TRUE;
+            shadow_rasterizer.depthBiasConstantFactor = 1.25f;
+            shadow_rasterizer.depthBiasClamp = 0.0f;
+            shadow_rasterizer.depthBiasSlopeFactor = 1.75f;
+
+            VkPipelineDepthStencilStateCreateInfo shadow_depth_stencil = depth_stencil;
+            shadow_depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+            VkPipelineColorBlendStateCreateInfo shadow_color_blending{};
+            shadow_color_blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            shadow_color_blending.logicOpEnable = VK_FALSE;
+            shadow_color_blending.attachmentCount = 0;
+            shadow_color_blending.pAttachments = nullptr;
+
+            VkGraphicsPipelineCreateInfo shadow_pipeline_info = pipeline_info;
+            shadow_pipeline_info.stageCount = 1;
+            shadow_pipeline_info.pStages = &vert_shader_stage_info;
+            shadow_pipeline_info.pRasterizationState = &shadow_rasterizer;
+            shadow_pipeline_info.pDepthStencilState = &shadow_depth_stencil;
+            shadow_pipeline_info.pColorBlendState = &shadow_color_blending;
+            shadow_pipeline_info.renderPass = m_shadow_render_pass;
+
+            check_vk(vkCreateGraphicsPipelines(m_device,
+                                               VK_NULL_HANDLE,
+                                               1,
+                                               &shadow_pipeline_info,
+                                               nullptr,
+                                               &m_shadow_pipeline),
+                     "Failed to create shadow pipeline");
 
             const std::filesystem::path post_vert_shader_path = shader_path("post.vert.spv");
             const std::filesystem::path bloom_frag_shader_path = shader_path("bloom.frag.spv");
@@ -2240,7 +2791,8 @@ namespace rose::core::vulkan
                                           VK_FORMAT_D32_SFLOAT_S8_UINT,
                                           VK_FORMAT_D24_UNORM_S8_UINT},
                                          VK_IMAGE_TILING_OPTIMAL,
-                                         VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+                                         VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+                                             | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
         }
 
         void create_render_targets()
@@ -2288,6 +2840,28 @@ namespace rose::core::vulkan
                          m_depth_image);
             m_depth_image.view = create_image_view(m_depth_image.image, m_depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
 
+            create_image(k_shadow_map_size,
+                         k_shadow_map_size,
+                         m_depth_format,
+                         VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                             | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         m_shadow_image);
+            m_shadow_image.view = create_image_view(m_shadow_image.image, m_depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+            create_image(k_shadow_map_size,
+                         k_shadow_map_size,
+                         m_depth_format,
+                         VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                             | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         m_sun_shadow_image);
+            m_sun_shadow_image.view =
+                create_image_view(m_sun_shadow_image.image, m_depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+            update_light_shadow_descriptors();
+
             if (dlss_active())
             {
                 create_image(m_swapchain_extent.width,
@@ -2326,6 +2900,21 @@ namespace rose::core::vulkan
 
             check_vk(vkCreateFramebuffer(m_device, &scene_framebuffer_info, nullptr, &m_scene_framebuffer),
                      "Failed to create scene framebuffer");
+
+            VkFramebufferCreateInfo shadow_framebuffer_info{};
+            shadow_framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            shadow_framebuffer_info.renderPass = m_shadow_render_pass;
+            shadow_framebuffer_info.attachmentCount = 1;
+            shadow_framebuffer_info.pAttachments = &m_shadow_image.view;
+            shadow_framebuffer_info.width = k_shadow_map_size;
+            shadow_framebuffer_info.height = k_shadow_map_size;
+            shadow_framebuffer_info.layers = 1;
+            check_vk(vkCreateFramebuffer(m_device, &shadow_framebuffer_info, nullptr, &m_shadow_framebuffer),
+                     "Failed to create shadow framebuffer");
+
+            shadow_framebuffer_info.pAttachments = &m_sun_shadow_image.view;
+            check_vk(vkCreateFramebuffer(m_device, &shadow_framebuffer_info, nullptr, &m_sun_shadow_framebuffer),
+                     "Failed to create sun shadow framebuffer");
 
             m_framebuffers.resize(m_swapchain_image_views.size());
             for (std::size_t i = 0; i < m_swapchain_image_views.size(); ++i)
@@ -3028,6 +3617,50 @@ namespace rose::core::vulkan
 
         void finish_scene_rendering()
         {
+            if (m_shadow_render_pass_active)
+            {
+                vkCmdEndRenderPass(m_active_command_buffer);
+                m_shadow_render_pass_active = false;
+                m_shadow_image.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+                begin_shadow_render_pass(ShadowPassKind::Sun);
+                for (const QueuedDrawCall& draw_call : m_queued_draw_calls)
+                {
+                    if (draw_call.mesh == nullptr || draw_call.outline_enabled)
+                        continue;
+
+                    GpuMesh& gpu_mesh = ensure_mesh_resource(*draw_call.mesh);
+                    if (gpu_mesh.index_count == 0)
+                        continue;
+
+                    draw_shadow_mesh(*draw_call.mesh, gpu_mesh);
+                }
+                vkCmdEndRenderPass(m_active_command_buffer);
+                m_shadow_render_pass_active = false;
+                m_sun_shadow_image.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+                begin_scene_render_pass();
+                for (const QueuedDrawCall& draw_call : m_queued_draw_calls)
+                {
+                    if (draw_call.mesh == nullptr || draw_call.camera == nullptr)
+                        continue;
+
+                    GpuMesh& gpu_mesh = ensure_mesh_resource(*draw_call.mesh);
+                    if (gpu_mesh.index_count == 0)
+                        continue;
+
+                    draw_scene_mesh_with_pipeline(*draw_call.mesh,
+                                                  *draw_call.camera,
+                                                  gpu_mesh,
+                                                  draw_call.pipeline,
+                                                  draw_call.outline_color,
+                                                  draw_call.outline_width,
+                                                  draw_call.outline_alpha,
+                                                  draw_call.outline_enabled);
+                }
+                m_queued_draw_calls.clear();
+            }
+
             if (!m_scene_render_pass_active)
                 return;
 
@@ -3120,25 +3753,25 @@ namespace rose::core::vulkan
             GpuTexture gpu_texture;
             create_image(width,
                          height,
-                         VK_FORMAT_R8G8B8A8_SRGB,
+                         VK_FORMAT_R8G8B8A8_UNORM,
                          VK_IMAGE_TILING_OPTIMAL,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                          gpu_texture.image);
 
             transition_image_layout(gpu_texture.image.image,
-                                    VK_FORMAT_R8G8B8A8_SRGB,
+                                    VK_FORMAT_R8G8B8A8_UNORM,
                                     VK_IMAGE_LAYOUT_UNDEFINED,
                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             copy_buffer_to_image(staging_buffer.buffer, gpu_texture.image.image, width, height);
             transition_image_layout(gpu_texture.image.image,
-                                    VK_FORMAT_R8G8B8A8_SRGB,
+                                    VK_FORMAT_R8G8B8A8_UNORM,
                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             destroy_buffer(staging_buffer);
 
             gpu_texture.image.view = create_image_view(gpu_texture.image.image,
-                                                       VK_FORMAT_R8G8B8A8_SRGB,
+                                                       VK_FORMAT_R8G8B8A8_UNORM,
                                                        VK_IMAGE_ASPECT_COLOR_BIT);
 
             VkSamplerCreateInfo sampler_info{};
@@ -3155,11 +3788,10 @@ namespace rose::core::vulkan
             sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
 
             check_vk(vkCreateSampler(m_device, &sampler_info, nullptr, &gpu_texture.sampler), "Failed to create texture sampler");
-            gpu_texture.descriptor = allocate_texture_descriptor(gpu_texture);
             return gpu_texture;
         }
 
-        [[nodiscard]] VkDescriptorSet allocate_texture_descriptor(const GpuTexture& texture) const
+        [[nodiscard]] VkDescriptorSet allocate_material_descriptor(const Mesh& mesh, const BufferResource& material_buffer)
         {
             VkDescriptorSetAllocateInfo alloc_info{};
             alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -3168,54 +3800,129 @@ namespace rose::core::vulkan
             alloc_info.pSetLayouts = &m_descriptor_set_layout;
 
             VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-            check_vk(vkAllocateDescriptorSets(m_device, &alloc_info, &descriptor_set), "Failed to allocate texture descriptor set");
+            check_vk(vkAllocateDescriptorSets(m_device, &alloc_info, &descriptor_set), "Failed to allocate material descriptor set");
 
-            VkDescriptorImageInfo image_info{};
-            image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            image_info.imageView = texture.image.view;
-            image_info.sampler = texture.sampler;
+            const std::array<GpuTexture*, 4> textures{
+                &texture_for_mesh_or_default(mesh, TextureType::BaseColor),
+                &texture_for_mesh_or_default(mesh, TextureType::Normal),
+                &texture_for_mesh_or_default(mesh, TextureType::MetallicRoughness),
+                &texture_for_mesh_or_default(mesh, TextureType::Emissive)
+            };
 
-            VkWriteDescriptorSet descriptor_write{};
-            descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptor_write.dstSet = descriptor_set;
-            descriptor_write.dstBinding = 0;
-            descriptor_write.dstArrayElement = 0;
-            descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptor_write.descriptorCount = 1;
-            descriptor_write.pImageInfo = &image_info;
+            std::array<VkDescriptorImageInfo, 4> image_infos{};
+            std::array<VkWriteDescriptorSet, 5> descriptor_writes{};
+            for (uint32_t binding = 0; binding < image_infos.size(); ++binding)
+            {
+                image_infos[binding].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                image_infos[binding].imageView = textures[binding]->image.view;
+                image_infos[binding].sampler = textures[binding]->sampler;
 
-            vkUpdateDescriptorSets(m_device, 1, &descriptor_write, 0, nullptr);
+                descriptor_writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptor_writes[binding].dstSet = descriptor_set;
+                descriptor_writes[binding].dstBinding = binding;
+                descriptor_writes[binding].dstArrayElement = 0;
+                descriptor_writes[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                descriptor_writes[binding].descriptorCount = 1;
+                descriptor_writes[binding].pImageInfo = &image_infos[binding];
+            }
+
+            VkDescriptorBufferInfo material_buffer_info{};
+            material_buffer_info.buffer = material_buffer.buffer;
+            material_buffer_info.offset = 0;
+            material_buffer_info.range = sizeof(MaterialUniform);
+
+            descriptor_writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptor_writes[4].dstSet = descriptor_set;
+            descriptor_writes[4].dstBinding = 4;
+            descriptor_writes[4].dstArrayElement = 0;
+            descriptor_writes[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptor_writes[4].descriptorCount = 1;
+            descriptor_writes[4].pBufferInfo = &material_buffer_info;
+
+            vkUpdateDescriptorSets(m_device,
+                                   static_cast<uint32_t>(descriptor_writes.size()),
+                                   descriptor_writes.data(),
+                                   0,
+                                   nullptr);
             return descriptor_set;
         }
 
-        [[nodiscard]] VkDescriptorSet default_texture_descriptor()
+        [[nodiscard]] GpuTexture& default_texture(GpuTexture& gpu_texture,
+                                                  bool& created,
+                                                  const std::array<unsigned char, 4>& pixel)
         {
-            if (!m_default_texture_created)
+            if (!created)
             {
-                const unsigned char white[] = {255u, 255u, 255u, 255u};
-                const Texture texture{1, 1, 4, white};
-                m_default_texture = create_texture_resource(texture);
-                m_default_texture_created = true;
+                const Texture texture{1, 1, 4, pixel.data()};
+                gpu_texture = create_texture_resource(texture);
+                created = true;
             }
-            return m_default_texture.descriptor;
+            return gpu_texture;
         }
 
-        [[nodiscard]] VkDescriptorSet descriptor_for_mesh_texture(const Mesh& mesh)
+        [[nodiscard]] GpuTexture& default_texture_for(TextureType type)
+        {
+            switch (type)
+            {
+            case TextureType::Normal:
+            {
+                constexpr std::array<unsigned char, 4> normal{128u, 128u, 255u, 255u};
+                return default_texture(m_default_normal_texture, m_default_normal_texture_created, normal);
+            }
+            case TextureType::Emissive:
+            {
+                constexpr std::array<unsigned char, 4> black{0u, 0u, 0u, 255u};
+                return default_texture(m_default_emissive_texture, m_default_emissive_texture_created, black);
+            }
+            case TextureType::BaseColor:
+            case TextureType::MetallicRoughness:
+            {
+                constexpr std::array<unsigned char, 4> white{255u, 255u, 255u, 255u};
+                return default_texture(m_default_texture, m_default_texture_created, white);
+            }
+            }
+
+            constexpr std::array<unsigned char, 4> white{255u, 255u, 255u, 255u};
+            return default_texture(m_default_texture, m_default_texture_created, white);
+        }
+
+        [[nodiscard]] GpuTexture& texture_resource(const Texture& texture)
+        {
+            const Texture* key = &texture;
+            const auto it = m_texture_resources.find(key);
+            if (it != m_texture_resources.end())
+                return it->second;
+
+            auto [inserted_it, _] = m_texture_resources.emplace(key, create_texture_resource(texture));
+            return inserted_it->second;
+        }
+
+        [[nodiscard]] GpuTexture& texture_for_mesh_or_default(const Mesh& mesh, TextureType type)
         {
             for (const MeshTexture& mesh_texture : mesh.textures())
             {
-                if (mesh_texture.type != TextureType::BaseColor || !mesh_texture.texture || !mesh_texture.texture->valid())
+                if (mesh_texture.type != type || !mesh_texture.texture || !mesh_texture.texture->valid())
                     continue;
 
-                const Texture* texture = mesh_texture.texture.get();
-                const auto it = m_texture_resources.find(texture);
-                if (it != m_texture_resources.end())
-                    return it->second.descriptor;
-
-                auto [inserted_it, _] = m_texture_resources.emplace(texture, create_texture_resource(*texture));
-                return inserted_it->second.descriptor;
+                return texture_resource(*mesh_texture.texture);
             }
-            return default_texture_descriptor();
+            return default_texture_for(type);
+        }
+
+        [[nodiscard]] static MaterialUniform material_uniform_for_mesh(const Mesh& mesh)
+        {
+            MaterialUniform uniform{};
+            const PbrMaterial& material = mesh.material();
+            std::copy(material.base_color_factor.begin(),
+                      material.base_color_factor.end(),
+                      uniform.base_color_factor);
+            std::copy(material.emissive_factor.begin(),
+                      material.emissive_factor.end(),
+                      uniform.emissive_factor);
+            uniform.metallic_factor = std::clamp(material.metallic_factor, 0.0f, 1.0f);
+            uniform.roughness_factor = std::clamp(material.roughness_factor, 0.04f, 1.0f);
+            uniform.normal_scale = material.normal_scale;
+            return uniform;
         }
 
         [[nodiscard]] GpuMesh& ensure_mesh_resource(const Mesh& mesh)
@@ -3239,7 +3946,23 @@ namespace rose::core::vulkan
             create_device_buffer(vertices.data(), vertex_buffer_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, gpu_mesh.vertex_buffer);
             create_device_buffer(triangles.data(), index_buffer_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, gpu_mesh.index_buffer);
             gpu_mesh.index_count = static_cast<uint32_t>(triangles.size() * 3u);
-            gpu_mesh.descriptor = descriptor_for_mesh_texture(mesh);
+
+            const MaterialUniform material_uniform = material_uniform_for_mesh(mesh);
+            create_buffer(sizeof(MaterialUniform),
+                          VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          gpu_mesh.material_buffer);
+            void* material_mapped = nullptr;
+            check_vk(vkMapMemory(m_device,
+                                  gpu_mesh.material_buffer.memory,
+                                  0,
+                                  sizeof(MaterialUniform),
+                                  0,
+                                  &material_mapped),
+                     "Failed to map material buffer");
+            std::memcpy(material_mapped, &material_uniform, sizeof(MaterialUniform));
+            vkUnmapMemory(m_device, gpu_mesh.material_buffer.memory);
+            gpu_mesh.descriptor = allocate_material_descriptor(mesh, gpu_mesh.material_buffer);
 
             omath::Vector3<float> local_min = vertices.front().position;
             omath::Vector3<float> local_max = vertices.front().position;
@@ -3273,6 +3996,7 @@ namespace rose::core::vulkan
             {
                 destroy_buffer(mesh.vertex_buffer);
                 destroy_buffer(mesh.index_buffer);
+                destroy_buffer(mesh.material_buffer);
             }
             m_mesh_resources.clear();
 
@@ -3284,6 +4008,16 @@ namespace rose::core::vulkan
             {
                 destroy_texture(m_default_texture);
                 m_default_texture_created = false;
+            }
+            if (m_default_normal_texture_created)
+            {
+                destroy_texture(m_default_normal_texture);
+                m_default_normal_texture_created = false;
+            }
+            if (m_default_emissive_texture_created)
+            {
+                destroy_texture(m_default_emissive_texture);
+                m_default_emissive_texture_created = false;
             }
         }
 
@@ -3542,5 +4276,25 @@ namespace rose::core::vulkan
     void Renderer::set_bloom_settings(const BloomSettings& settings)
     {
         m_impl->set_bloom_settings(settings);
+    }
+
+    SpotlightSettings Renderer::spotlight_settings() const
+    {
+        return m_impl->m_spotlight_settings;
+    }
+
+    void Renderer::set_spotlight_settings(const SpotlightSettings& settings)
+    {
+        m_impl->set_spotlight_settings(settings);
+    }
+
+    SunSettings Renderer::sun_settings() const
+    {
+        return m_impl->m_sun_settings;
+    }
+
+    void Renderer::set_sun_settings(const SunSettings& settings)
+    {
+        m_impl->set_sun_settings(settings);
     }
 } // namespace rose::core::vulkan
